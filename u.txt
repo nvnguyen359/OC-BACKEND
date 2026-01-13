@@ -1,0 +1,80 @@
+🔑 Giải thích
+reset_db.sh: xóa file SQLite cũ, tạo lại từ init.sql.
+
+load_sample.sh: nạp dữ liệu mẫu từ sample.sql.
+
+run_dev.sh: chạy server dev với reload.
+
+run_prod.sh: chạy server production bằng gunicorn.
+
+
+1. Nhóm File Cần Tạo Mới (Core Logic)
+Đây là những file chứa "bộ não" xử lý camera và AI để không làm treo máy.
+
+app/services/ai_worker.py
+
+Nhiệm vụ: Đây là file chạy trên một Process (tiến trình) hoàn toàn riêng biệt. Nó chịu trách nhiệm load model YOLO và nhận ảnh để phát hiện người.
+
+Tại sao cần: Để tách việc tính toán nặng ra khỏi luồng chính, giúp video không bị khựng khi AI đang "suy nghĩ".
+
+app/services/camera_manager.py
+
+Nhiệm vụ: Đây là "người quản lý" chính (Main Process).
+
+Quản lý kết nối phần cứng Camera (OpenCV).
+
+Tạo các luồng con (Threads): Luồng đọc cam, Luồng ghi thẻ nhớ, Luồng gửi ảnh sang AI.
+
+Quản lý hàng đợi (Queue) giao tiếp với ai_worker.py.
+
+Lưu ý: File này thay thế vai trò xử lý luồng của camera_service.py cũ (file cũ chỉ nên giữ lại để thao tác Database CRUD).
+
+app/utils/draw_utils.py
+
+Nhiệm vụ: Chứa hàm vẽ chữ "Viền đen - Lõi trắng" và vẽ khung cảnh báo.
+
+Tại sao cần: Tách biệt code vẽ vời ra khỏi logic xử lý để code gọn gàng, dễ sửa font chữ hay màu sắc sau này.
+
+app/models/ (Thư mục mới)
+
+Nhiệm vụ: Bạn cần tạo thư mục này và bỏ file model vào (ví dụ: yolov8n_int8.tflite).
+
+2. Nhóm File Cần Sửa Đổi (Integration)
+Bạn cần sửa các file này để hệ thống cũ gọi được vào hệ thống mới.
+
+app/api/routers/camera_router.py
+
+Cần làm gì:
+
+Thêm API GET /{id}/stream: Để trả về luồng video MJPEG cho thẻ <img> ở Client.
+
+Thêm API GET /{id}/ai-overlay: Để Client lấy tọa độ vẽ khung (nếu cần).
+
+Thêm API POST /{id}/record: Để nhận lệnh Bắt đầu/Dừng quay video.
+
+Kết nối các API này vào camera_manager.py thay vì code xử lý cũ.
+
+app/main.py
+
+Cần làm gì:
+
+Sử dụng sự kiện @app.on_event("startup") để khởi động CameraSystem (bật AI Process và Camera ngay khi Server chạy).
+
+Sử dụng @app.on_event("shutdown") để tắt camera và giải phóng tài nguyên an toàn khi tắt Server.
+
+app/core/config.py
+
+Cần làm gì: Thêm các biến cấu hình như đường dẫn tới file model AI, độ phân giải camera mong muốn, hoặc thư mục lưu video (VIDEO_STORAGE_PATH).
+
+Tóm tắt luồng công việc:
+Bước 1: Tải model .tflite về và tạo folder app/models.
+
+Bước 2: Viết app/utils/draw_utils.py (Logic vẽ đơn giản nhất).
+
+Bước 3: Viết app/services/ai_worker.py (Logic xử lý AI độc lập).
+
+Bước 4: Viết app/services/camera_manager.py (Logic quản lý cam, kết nối AI).
+
+Bước 5: Sửa app/api/routers/camera_router.py để mở API cho Client gọi.
+
+Bước 6: Sửa app/main.py để kích hoạt mọi thứ.
