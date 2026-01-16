@@ -138,7 +138,7 @@ async def websocket_ai_overlay(
                         first_code = qr_objects[0]
                         msg["event"] = "QR_SCANNED"
                         msg["data"] = { 
-                            "code": first_code.get("code_content"),
+                            "code": first_code.get("code"),
                             "type": first_code.get("code_type")
                         }
 

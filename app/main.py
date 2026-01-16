@@ -1,7 +1,6 @@
 # app/main.py
 
 import uvicorn
-import threading
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
@@ -15,12 +14,10 @@ from app.core.router_loader import auto_include_routers
 from app.core.openapi_config import configure_openapi
 from app.core.docs_utils import custom_swagger_ui_html_response
 
-# [FIX] Import SessionLocal thay vì get_db
-from app.db.session import SessionLocal
-from app.services.camera_management_service import run_camera_upsert_loop
 from scripts.check_db import main as check_db_main
-# [FIX] Import camera_system để shutdown khi tắt app
-from app.workers.camera_worker import camera_system
+
+# [FIX] Chỉ import từ run_worker, không import trực tiếp worker lẻ
+from app.workers.run_worker import start_all_workers, stop_all_workers
 
 # ==========================================
 # 1. CẤU HÌNH ĐƯỜNG DẪN
@@ -51,30 +48,27 @@ app.add_middleware(AuthMiddleware)
 auto_include_routers(app) 
 configure_openapi(app)
 
-# 5. Startup Event
+# ==========================================
+# 5. STARTUP & SHUTDOWN EVENTS
+# ==========================================
 @app.on_event("startup")
 async def startup_event():
     print(f"🚀 Server running at http://{settings.HOST}:{settings.PORT}")
     
-    # Check DB
+    # 1. Check DB
     try:
         check_db_main()
     except Exception as e:
         print(f"⚠️ Warning: Check DB failed: {e}")
 
-    # [FIX] Truyền SessionLocal (factory) thay vì get_db
-    camera_thread = threading.Thread(
-        target=run_camera_upsert_loop, 
-        args=(SessionLocal, 5),
-        daemon=True
-    )
-    camera_thread.start()
+    # 2. [QUAN TRỌNG] Bật toàn bộ Worker (Camera, AI, UpsertDB)
+    start_all_workers()
 
-# Shutdown Event (Optional: Clean up resources)
+
 @app.on_event("shutdown")
 async def shutdown_event():
-    print("🛑 Shutting down camera workers...")
-    camera_system.shutdown()
+    # [QUAN TRỌNG] Tắt toàn bộ Worker sạch sẽ
+    stop_all_workers()
 
 # ==========================================
 # 6. SWAGGER UI

@@ -47,7 +47,7 @@ class CameraBase(BaseModel):
     os_index: Optional[int] = None
     # --------------------------------------------------
 
-    device_id: str = Field(..., min_length=3, max_length=100)
+    device_id: str = Field(..., min_length=1, max_length=100)
     display_name: Optional[str] = None
     unique_id:Optional[str] = None
     rtsp_url: Optional[str] = None
@@ -59,7 +59,7 @@ class CameraBase(BaseModel):
 
 class CameraCreate(CameraBase):
     # Khai báo lại các trường bắt buộc (NOT NULL trong models.py)
-    device_id: str = Field(..., min_length=3, max_length=100)
+    device_id: str = Field(..., min_length=1, max_length=100)
     unique_id: str = Field(...) 
 
 
