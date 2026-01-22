@@ -130,5 +130,6 @@ def clear_all_data(db: Session = Depends(get_db)):
     """Xóa sạch đơn hàng và file vật lý"""
     count = order_crud.remove_all(db)
     return response_success(
-        message=f"Đã xóa {count} đơn hàng và dọn dẹp file thành công."
-    )
+            mes=f"Đã xóa {count} đơn hàng và dọn dẹp file thành công.",
+            data=None
+        )

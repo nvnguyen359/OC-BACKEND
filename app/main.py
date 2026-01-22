@@ -14,11 +14,13 @@ from app.core.router_loader import auto_include_routers
 from app.core.openapi_config import configure_openapi
 from app.core.docs_utils import custom_swagger_ui_html_response
 
+# [NEW] Import cấu hình Media Dynamic từ DB
+from app.core.media_config import configure_static_media
+
 from scripts.check_db import main as check_db_main
-
-# [FIX] Chỉ import từ run_worker, không import trực tiếp worker lẻ
 from app.workers.run_worker import start_all_workers, stop_all_workers
-
+from app.services.socket_service import socket_service
+import asyncio
 # ==========================================
 # 1. CẤU HÌNH ĐƯỜNG DẪN
 # ==========================================
@@ -44,7 +46,15 @@ app.add_middleware(
 )
 app.add_middleware(AuthMiddleware)
 
-# 4. Load Config
+# ==========================================
+# 4. LOAD CONFIG & MEDIA
+# ==========================================
+
+# [FIX] Cấu hình Media Dynamic (OC-media) dựa trên DB
+# Việc này giúp URL ảnh đúng chuẩn: http://host:port/OC-media/avatars/xxx.jpg
+configure_static_media(app)
+
+# Load Routers & OpenAPI
 auto_include_routers(app) 
 configure_openapi(app)
 
@@ -54,20 +64,20 @@ configure_openapi(app)
 @app.on_event("startup")
 async def startup_event():
     print(f"🚀 Server running at http://{settings.HOST}:{settings.PORT}")
-    
+    socket_service.set_loop(asyncio.get_running_loop())
     # 1. Check DB
     try:
         check_db_main()
     except Exception as e:
         print(f"⚠️ Warning: Check DB failed: {e}")
 
-    # 2. [QUAN TRỌNG] Bật toàn bộ Worker (Camera, AI, UpsertDB)
+    # 2. Bật toàn bộ Worker (Camera, AI, UpsertDB)
     start_all_workers()
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # [QUAN TRỌNG] Tắt toàn bộ Worker sạch sẽ
+    # Tắt toàn bộ Worker sạch sẽ
     stop_all_workers()
 
 # ==========================================
@@ -82,14 +92,17 @@ async def docs_page():
     )
 
 # ==========================================
-# 7. SERVE FRONTEND
+# 7. SERVE FRONTEND (SPA)
 # ==========================================
 if CLIENT_DIR.exists():
+    # Mount assets của frontend
     if (CLIENT_DIR / "assets").exists():
         app.mount("/assets", StaticFiles(directory=str(CLIENT_DIR / "assets")), name="assets")
 
+    # Catch-all route cho SPA (Angular/React)
     @app.get("/{file_path:path}", include_in_schema=False)
     async def serve_spa(file_path: str):
+        # Tránh conflict với API hoặc OpenAPI
         if file_path.startswith("api/") or file_path == "openapi.json":
              return JSONResponse({"detail": "Not Found"}, status_code=404)
 
@@ -97,6 +110,7 @@ if CLIENT_DIR.exists():
         if file_location.is_file():
             return FileResponse(file_location)
         
+        # Mặc định trả về index.html để Router frontend xử lý
         return FileResponse(CLIENT_DIR / "index.html")
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # Pydantic schemas cho request/response
 # app/db/schemas.py
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field
 
 # =========================
@@ -125,3 +125,13 @@ class OrderOut(OrderBase):
 
     class Config:
         from_attributes = True
+# Dùng để nhận dữ liệu Update từ Client (Dạng JSON phẳng)
+# Ví dụ: { "save_media": "D:/CameraData", "camera_width": "1920" }
+class SettingsUpdate(BaseModel):
+    settings: Dict[str, Any]
+
+# Dùng để hiển thị ra API
+class SettingsResponse(BaseModel):
+    code: int
+    mes: str
+    data: Dict[str, Any]

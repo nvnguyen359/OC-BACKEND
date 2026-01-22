@@ -1,34 +1,54 @@
 # app/api/routers/setting_router.py
-from fastapi import APIRouter, Depends, Body
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Dict, Any
-from app.db.session import get_db
-from app.crud.setting_crud import setting_crud
-from app.utils.response import response_success
 
-router = APIRouter(prefix="/settings", tags=["settings"])
+from app.api import deps
+from app.crud.setting_crud import setting as setting_crud
+from app.db.schemas import SettingsUpdate, SettingsResponse
 
-@router.post("/sync")
-def sync_settings(
-    payload: Dict[str, Any] = Body(...), # Nhận JSON dynamic (key: value)
-    db: Session = Depends(get_db)
+router = APIRouter(prefix="/settings", tags=["Settings"])
+
+@router.get("/", response_model=SettingsResponse)
+def get_settings(db: Session = Depends(deps.get_db)):
+    """
+    Lấy toàn bộ cấu hình hệ thống.
+    Nếu DB chưa có, sẽ trả về giá trị mặc định (save_media, resolution...).
+    """
+    data = setting_crud.get_all_as_dict(db)
+    return {
+        "code": 200,
+        "mes": "success",
+        "data": data
+    }
+
+@router.post("/", response_model=SettingsResponse)
+def update_settings(
+    payload: Dict[str, Any], # Nhận trực tiếp JSON {key: value}
+    db: Session = Depends(deps.get_db)
 ):
-    results = []
-    # Duyệt qua từng field trong JSON
-    for key, value in payload.items():
-        # Gọi logic upsert
-        # Chuyển value sang string để đồng bộ kiểu dữ liệu TEXT trong DB
-        db_setting = setting_crud.upsert_by_key(db, key=key, value=str(value))
-        results.append({db_setting.key: db_setting.value})
+    """
+    Cập nhật cấu hình (Batch Update).
+    Body ví dụ:
+    {
+        "save_media": "D:/MyData",
+        "camera_width": 1920,
+        "camera_height": 1080
+    }
+    """
+    success = setting_crud.update_batch(db, payload)
+    
+    if not success:
+        return {
+            "code": 500,
+            "mes": "Update failed",
+            "data": {}
+        }
 
-    return response_success(
-        data=results, 
-        message="Settings synced successfully"
-    )
-
-@router.get("")
-def get_all_settings(db: Session = Depends(get_db)):
-    settings = setting_crud.get_multi(db)
-    # Chuyển list object thành dict đơn giản
-    data = {s.key: s.value for s in settings}
-    return response_success(data=data)
+    # Trả về dữ liệu mới nhất sau khi update
+    new_data = setting_crud.get_all_as_dict(db)
+    return {
+        "code": 200,
+        "mes": "Settings updated successfully",
+        "data": new_data
+    }

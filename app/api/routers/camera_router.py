@@ -4,6 +4,7 @@ import json
 import time
 import cv2
 import numpy as np
+from datetime import datetime
 from typing import List, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Query
@@ -44,7 +45,7 @@ class CameraListResponse(BaseModel):
     data: List[schemas.CameraOut]
 
 # =========================================================
-# 1. WEBSOCKET: AI EVENTS + SYSTEM STATS
+# 1. WEBSOCKET: AI EVENTS + SYSTEM STATS + ACTIVE ORDERS
 # =========================================================
 
 async def get_ws_user(token: str):
@@ -76,7 +77,8 @@ async def websocket_ai_overlay(
     WebSocket Đa Năng:
     1. Gửi AI Metadata (Human Box, QR Code).
     2. Gửi System Stats (CPU, RAM).
-    3. Nhận lệnh chuyển Camera từ Client.
+    3. [REALTIME] Push Active Orders List (Danh sách đang đóng gói).
+    4. [EVENT] Gửi sự kiện nghiệp vụ (Created/Stopped) dựa trên Timestamp.
     """
     # 1. Auth
     user = await get_ws_user(token)
@@ -86,96 +88,121 @@ async def websocket_ai_overlay(
 
     await websocket.accept()
     
-    # Xác định camera mục tiêu (Nếu client chỉ định)
+    # Xác định camera mục tiêu
     target_cam_id = camera_id
-    if target_cam_id:
-        print(f"✅ [WS] Client connected: {user.username} -> Watching Cam {target_cam_id}")
-    else:
-        print(f"✅ [WS] Client connected: {user.username} -> Dashboard Mode")
+    print(f"✅ [WS] Connected: {user.username}")
 
-    # Biến đếm để điều tiết tốc độ gửi System Stats
     tick_count = 0 
+    
+    # [FIX] Theo dõi timestamp của event cuối cùng đã gửi để tránh lặp/mất tin
+    # Dict lưu {cam_id: last_event_timestamp (float)}
+    last_event_timestamps = {}
 
     try:
         while True:
-            # --- A. Gửi System Stats (Mỗi 10 tick ~ 0.5s) ---
-            # [BỔ SUNG] Gửi thông số RAM/CPU xuống Client
             tick_count += 1
+
+            # -----------------------------------------------------------
+            # [MỚI] PUSH DANH SÁCH PACKING ORDERS & STATS (Mỗi 0.5s)
+            # -----------------------------------------------------------
             if tick_count % 10 == 0:
+                # 1. System Stats
                 stats_msg = {
                     "type": "system_stats",
-                    "data": camera_system.system_stats # Lấy từ biến toàn cục bên Worker
+                    "data": camera_system.system_stats
                 }
-                try: 
-                    await websocket.send_json(stats_msg)
-                except RuntimeError: 
-                    return # Socket đóng thì thoát ngay
-                except Exception: 
-                    pass
+                try: await websocket.send_json(stats_msg)
+                except: pass
 
-            # --- B. Gửi AI Metadata (Camera) ---
+                # 2. Active Orders List (Lấy trực tiếp từ RAM Worker)
+                # Giúp Client hiển thị danh sách ngay lập tức, không cần gọi API
+                active_orders = []
+                for cid, cam in camera_system.cameras.items():
+                    # Chỉ lấy camera đang chạy và đang trong trạng thái PACKING
+                    if cam.is_running and cam.recording:
+                        active_orders.append({
+                            "camera_id": cid,
+                            "order_id": cam.current_order_db_id,
+                            "code": cam.machine.current_code,
+                            # Chuyển start_time sang ISO string
+                            "start_time": datetime.fromtimestamp(cam.rec_start_time).isoformat(),
+                            # Lấy avatar tạm từ RAM (cập nhật tức thì)
+                            "path_avatar": cam.current_avatar_path 
+                        })
+                
+                # Gửi danh sách xuống Client
+                try: await websocket.send_json({ "type": "active_orders", "data": active_orders })
+                except: pass
+
+            # -----------------------------------------------------------
+            # B. Gửi Metadata & Events từ các Camera (Realtime)
+            # -----------------------------------------------------------
             active_cameras = list(camera_system.cameras.items())
             
             for cam_id, cam in active_cameras:
-                # Nếu Client đang focus vào 1 camera cụ thể, bỏ qua các camera khác
+                # Nếu client đang focus 1 cam cụ thể, bỏ qua cam khác
                 if target_cam_id is not None and cam_id != target_cam_id:
                     continue
 
-                if cam.is_running and cam.ai_metadata:
-                    # Cấu trúc tin nhắn khớp với Client
+                if not cam.is_running: continue
+
+                # 1. Gửi AI Metadata (Bounding Box) - Realtime liên tục
+                if cam.ai_metadata:
                     msg = {
                         "camera_id": cam_id,
-                        "metadata": cam.ai_metadata, # List các box (Human, QR Box)
+                        "metadata": cam.ai_metadata, 
                         "timestamp": str(time.time())
                     }
 
-                    # --- LOGIC EVENT QR CODE ---
-                    # Tìm trong metadata xem có QR/Barcode không?
+                    # Logic QR_SCANNED từ Metadata (Backup cho realtime view)
                     qr_objects = [obj for obj in cam.ai_metadata if obj.get("type") in ["qrcode", "code"]]
-                    
                     if qr_objects:
-                        # Nếu có, bắn thêm Event 'QR_SCANNED' kèm dữ liệu mã
-                        first_code = qr_objects[0]
                         msg["event"] = "QR_SCANNED"
                         msg["data"] = { 
-                            "code": first_code.get("code"),
-                            "type": first_code.get("code_type")
+                            "code": qr_objects[0].get("code"),
+                            "type": qr_objects[0].get("code_type")
                         }
+                    
+                    try: await websocket.send_json(msg)
+                    except: break
 
-                    # [FIX QUAN TRỌNG] Bọc send_json trong try/except để bắt lỗi Socket Closed
-                    try:
-                        await websocket.send_json(msg)
-                    except RuntimeError:
-                        # Lỗi này xảy ra khi Client ngắt kết nối đột ngột
-                        return 
-                    except Exception:
-                        return
+                # 2. [FIX QUAN TRỌNG] Gửi Sự kiện Nghiệp vụ (ORDER_CREATED/STOPPED)
+                # Check xem camera có event mới không bằng timestamp
+                if hasattr(cam, 'stream_metadata') and cam.stream_metadata:
+                    evt_data = cam.stream_metadata
+                    # Lấy timestamp của sự kiện từ Worker (mặc định là 0 nếu không có)
+                    current_evt_ts = evt_data.get("ts", 0)
+                    
+                    # Lấy timestamp đã gửi lần trước cho cam này
+                    last_sent_ts = last_event_timestamps.get(cam_id, 0)
+                    
+                    # Nếu timestamp mới lớn hơn cái cũ -> Có sự kiện mới -> Gửi
+                    if current_evt_ts > last_sent_ts:
+                        msg_evt = {
+                            "camera_id": cam_id,
+                            "event": evt_data.get("event"),
+                            "data": evt_data.get("data"),
+                            "timestamp": str(time.time())
+                        }
+                        try: await websocket.send_json(msg_evt)
+                        except: break
+                        
+                        # Cập nhật timestamp đã gửi để không gửi lại
+                        last_event_timestamps[cam_id] = current_evt_ts
 
             # --- C. Check tin nhắn từ Client (Non-blocking) ---
-            # Ví dụ: Client chuyển sang xem Camera khác
             try:
-                # Chờ tin nhắn trong 0.05s (Tạo độ trễ ~20FPS cho loop)
                 data = await asyncio.wait_for(websocket.receive_json(), timeout=0.05)
-                
-                # Client gửi: {"camera_id": 2}
+                # Client chuyển cam: {"camera_id": 2}
                 new_id = data.get("camera_id") or data.get("cam_id")
-                if new_id:
-                    target_cam_id = int(new_id)
-            
-            except asyncio.TimeoutError:
-                pass # Không có tin nhắn -> tiếp tục loop
-            except WebSocketDisconnect:
-                print(f"🔌 [WS] Client disconnected: {user.username}")
-                return # Thoát vòng lặp
-            except Exception:
-                pass 
+                if new_id: target_cam_id = int(new_id)
+            except asyncio.TimeoutError: pass 
+            except WebSocketDisconnect: return 
+            except Exception: pass 
 
-    except WebSocketDisconnect:
-        print(f"🔌 [WS] Disconnected: {user.username}")
     except Exception as e:
-        print(f"❌ [WS] Unexpected Error: {e}")
+        print(f"❌ [WS] Error: {e}")
     finally:
-        # Cố gắng đóng socket nếu chưa đóng
         try: await websocket.close() 
         except: pass
 
@@ -185,132 +212,94 @@ async def websocket_ai_overlay(
 # =========================================================
 
 @router.get("/{cam_id}/stream")
-def get_camera_stream(cam_id: int):
-    """
-    MJPEG Stream Endpoint.
-    Trả về luồng video (đã được resize 720p ở worker để giảm lag).
-    """
+async def get_camera_stream(cam_id: int):
+    """MJPEG Stream Endpoint"""
     cam = camera_system.get_camera(cam_id)
+    if not cam: 
+        # Nếu cam chưa chạy trong system, có thể do vừa khởi động hoặc lỗi
+        # Tuy nhiên với logic background mode, ta vẫn check trong DB xem có nên chạy không
+        # Ở đây đơn giản trả về lỗi để FE retry
+        raise HTTPException(status_code=404, detail="Camera not active in background")
     
-    # Nếu worker chưa chạy, trả về lỗi 404
-    if not cam:
-        raise HTTPException(status_code=404, detail="Camera not active")
-    
-    def iterfile():
+    async def iterfile():
         while True:
             try:
-                # Lấy ảnh JPEG từ worker (đã resize)
                 frame_bytes = cam.get_jpeg()
-                
                 if frame_bytes:
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 else:
-                    # Nếu chưa có ảnh (đang khởi động), gửi ảnh Placeholder
-                    yield (b'--frame\r\n'
-                           b'Content-Type: image/jpeg\r\n\r\n' + PLACEHOLDER_BYTES + b'\r\n')
-                    time.sleep(0.1) # Gửi chậm khi loading
-                
-                # Sleep cực ngắn để kiểm soát tốc độ stream
-                time.sleep(0.01)
-            except Exception:
-                # Client ngắt kết nối stream -> Thoát vòng lặp
-                break
+                    yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + PLACEHOLDER_BYTES + b'\r\n')
+                await asyncio.sleep(0.03 if frame_bytes else 0.2)
+            except GeneratorExit: break
+            except Exception: break
 
     return StreamingResponse(iterfile(), media_type="multipart/x-mixed-replace;boundary=frame")
 
 
 @router.get("/{cam_id}/snapshot")
 def get_camera_snapshot(cam_id: int):
-    """
-    [MỚI] Lấy 1 ảnh tĩnh (Snapshot) mới nhất từ Worker.
-    Dùng để hiển thị background khi Client không muốn load cả Video Stream.
-    """
     cam = camera_system.get_camera(cam_id)
-    
-    # 1. Nếu Camera đang chạy -> Lấy ảnh từ RAM
     if cam and cam.is_running:
-        # Ưu tiên dùng get_snapshot (nét hơn), nếu chưa có thì dùng get_jpeg
-        if hasattr(cam, 'get_snapshot'):
-            img_bytes = cam.get_snapshot()
-        else:
-            img_bytes = cam.get_jpeg() # Fallback
-
-        if img_bytes:
-            return Response(content=img_bytes, media_type="image/jpeg")
-    
-    # 2. Nếu Camera không chạy hoặc chưa có ảnh -> Trả về ảnh mặc định
+        img_bytes = cam.get_snapshot() if hasattr(cam, 'get_snapshot') else cam.get_jpeg()
+        if img_bytes: return Response(content=img_bytes, media_type="image/jpeg")
     return Response(content=PLACEHOLDER_BYTES, media_type="image/jpeg")
 
 
 # =========================================================
-# 3. HTTP POLLING FALLBACK (Cho UI vẽ Box nếu không dùng WS)
+# 3. HTTP POLLING FALLBACK & CONTROL (FIXED LOGIC)
 # =========================================================
 
 @router.get("/{cam_id}/ai-overlay")
 def get_ai_overlay_http(cam_id: int):
     cam = camera_system.get_camera(cam_id)
-    if not cam: return []
-    return cam.ai_metadata
-
-
-# =========================================================
-# 4. CONTROL API (CONNECT / DISCONNECT / RECORD)
-# =========================================================
+    return cam.ai_metadata if cam else []
 
 @router.post("/{cam_id}/connect")
 def connect_camera(cam_id: int, db: Session = Depends(get_db)):
-    """Bật Camera (Khởi động Worker)"""
     svc = CameraService(db)
     
-    # 1. Update DB Status -> ACTIVE
-    cam = svc.connect_camera(cam_id)
+    # 1. Chỉ lấy thông tin camera, chưa vội update
+    cam = svc.get_camera(cam_id)
     if not cam: raise HTTPException(404, "Camera not found")
 
-    # 2. Lấy Source (Ưu tiên Device Path -> RTSP -> ID)
     source = cam.device_path or cam.rtsp_url or cam.device_id
-    
-    # Nếu là số (Index 0, 1...) -> Convert sang int
     if str(source).isdigit(): source = int(source)
     
-    # 3. Kích hoạt Worker (Nếu chưa chạy)
-    try:
+    try: 
+        # 2. [FIX] Đảm bảo DB là ACTIVE để worker không bị kill
+        # Sử dụng update_camera để set status
+        svc.update_camera(cam_id, schemas.CameraUpdate(status='ACTIVE'))
+        
+        # 3. Add vào system (Hàm add_camera trong system đã fix để không restart nếu đang chạy)
         camera_system.add_camera(cam_id, source)
+        
     except Exception as e:
-        svc.disconnect_camera(cam_id)
         raise HTTPException(500, f"Worker Error: {e}")
-    
+        
     return response_success(data=cam)
 
 
 @router.post("/{cam_id}/disconnect")
 def disconnect_camera(cam_id: int, db: Session = Depends(get_db)):
     """
-    Client gọi API này khi người dùng tắt xem camera.
-    QUAN TRỌNG: 
-    - CHỈ cập nhật trạng thái UI trong DB (is_connected = 0).
-    - KHÔNG TẮT Worker (Worker vẫn chạy ngầm để bắt QR).
+    [FIX] Logic Disconnect:
+    - Chỉ trả về success để Frontend dừng stream.
+    - KHÔNG gọi svc.disconnect_camera() (vì hàm đó set DB = DISCONNECTED -> kill worker).
+    - Giữ worker chạy ngầm.
     """
-    svc = CameraService(db)
+    # svc = CameraService(db)
+    # cam = svc.disconnect_camera(cam_id)  <-- BỎ DÒNG NÀY
     
-    # [LOGIC CŨ ĐÃ BỎ]: real_cam.stop() -> Gây mất kết nối hoàn toàn
-    
-    # Chỉ update status DB
-    cam = svc.disconnect_camera(cam_id)
-    
-    return response_success(data=cam)
+    return response_success(data={"status": "view_disconnected", "message": "Camera running in background"})
 
 
 @router.post("/{cam_id}/record")
 def control_recording(cam_id: int, action: str = "start", code: str = None, db: Session = Depends(get_db)):
-    """Điều khiển ghi hình Video"""
     cam_runtime = camera_system.get_camera(cam_id)
-    
-    if not cam_runtime:
-         raise HTTPException(status_code=404, detail="Camera is not running (Worker offline)")
+    if not cam_runtime: raise HTTPException(404, "Camera is not running")
     
     if action == "start":
-        cam_runtime.start_recording(order_code=code or "MANUAL")
+        cam_runtime.start_recording(code=code or "MANUAL")
     else:
         cam_runtime.stop_recording()
     
@@ -318,7 +307,7 @@ def control_recording(cam_id: int, action: str = "start", code: str = None, db: 
 
 
 # =========================================================
-# 5. BASIC CRUD (GET, LIST, CREATE, UPDATE, DELETE)
+# 4. BASIC CRUD
 # =========================================================
 
 @router.get("/{cam_id}")
@@ -327,18 +316,22 @@ def get_camera(cam_id: int, db: Session = Depends(get_db)):
     cam = svc.get_camera(cam_id)
     if not cam: raise HTTPException(404, "Camera not found")
     
-    # Merge trạng thái thực tế từ Worker
+    # --- [FIX] Lấy trạng thái thực từ Worker ---
     cam_data = schemas.CameraOut.model_validate(cam).model_dump()
     real_cam = camera_system.get_camera(cam_id)
     
     if real_cam:
-        # Nếu worker đang chạy
+        cam_data['is_connected'] = True
         cam_data['recording_state'] = 'MANUAL' if real_cam.recording else 'IDLE'
-        if real_cam.order_code and real_cam.order_code != "MANUAL":
+        
+        # [FIX CRASH] Sử dụng real_cam.machine.current_code thay vì real_cam.order_code
+        current_code = real_cam.machine.current_code if hasattr(real_cam, 'machine') else None
+        
+        if current_code and current_code != "MANUAL":
             cam_data['recording_state'] = 'AUTO'
-            cam_data['active_order_code'] = real_cam.order_code
+            cam_data['active_order_code'] = current_code
     else:
-        # Worker không chạy
+        cam_data['is_connected'] = False
         cam_data['recording_state'] = 'DISCONNECTED'
     
     return response_success(data=cam_data)
@@ -346,40 +339,28 @@ def get_camera(cam_id: int, db: Session = Depends(get_db)):
 
 @router.post("")
 def create_camera(cam: schemas.CameraCreate, db: Session = Depends(get_db)):
-    svc = CameraService(db)
-    return response_success(svc.create_camera(cam))
-
+    return response_success(CameraService(db).create_camera(cam))
 
 @router.get("", response_model=CameraListResponse)
 def get_all_cameras(db: Session = Depends(get_db), skip: int = 0, limit: int = 100):
-    svc = CameraService(db)
-    return response_success(svc.get_all_cameras(skip, limit))
-
+    return response_success(CameraService(db).get_all_cameras(skip, limit))
 
 @router.patch("/{cam_id}")
 def update_camera(cam_id: int, cam_in: schemas.CameraUpdate, db: Session = Depends(get_db)):
-    svc = CameraService(db)
-    return response_success(svc.update_camera(cam_id, cam_in))
-
+    return response_success(CameraService(db).update_camera(cam_id, cam_in))
 
 @router.delete("/{cam_id}")
 def delete_camera(cam_id: int, db: Session = Depends(get_db)):
     svc = CameraService(db)
     
-    # Nếu xóa hẳn Camera khỏi hệ thống -> Thì mới Stop Worker
-    real_cam = camera_system.get_camera(cam_id)
-    if real_cam: 
-        real_cam.stop()
-        
+    # [FIX] Khi xóa hẳn camera mới dừng Worker
+    camera_system.stop_camera(cam_id)
+    
     return response_success(svc.delete_camera(cam_id))
-
 
 @router.delete("")
 def delete_all_cameras(db: Session = Depends(get_db)):
     svc = CameraService(db)
-    # Tắt toàn bộ hệ thống
     camera_system.shutdown()
-    # Khởi tạo lại object rỗng
     camera_system.__init__() 
-    
     return response_success(data={"deleted": svc.delete_all_cameras()})
