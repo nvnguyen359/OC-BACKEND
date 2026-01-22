@@ -8,7 +8,7 @@ class OrderStatus(str, Enum):
 
 class OrderNote(str, Enum):
     # --- START ---
-    NEW_ORDER = "Đơn mới (New)"
+    NEW_ORDER = "Đơn mới hôm nay"
     REPACK = "Đóng lại / Bổ sung (Repack)"
     
     # --- END ---

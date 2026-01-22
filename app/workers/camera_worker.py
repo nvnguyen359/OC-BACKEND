@@ -10,7 +10,6 @@
 # 1. Import các hằng số/hàm tiện ích nếu cần thiết (từ camera_runtime)
 from app.workers.camera_runtime import (
     CameraRuntime,
-    play_audio_alert,
     FPS_RECORD
 )
 

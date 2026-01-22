@@ -4,7 +4,7 @@ import threading
 import time
 import multiprocessing
 import platform
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Any
 import pytz
 
@@ -22,24 +22,14 @@ from app.db.session import SessionLocal
 from app.services.google_tts import tts_service
 from app.services.socket_service import socket_service
 
+# [QUAN TRỌNG] Import để query đếm số đơn
+from sqlalchemy import func, distinct
+from app.db import models 
+
 # --- CẤU HÌNH CỤC BỘ ---
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 FPS_RECORD = 20.0
 RECONNECT_DELAY = 5.0
-
-def play_audio_alert(file_path: str):
-    def _run():
-        try:
-            if not os.path.exists(file_path): return
-            if platform.system() == "Linux":
-                os.system(f"mpg123 -q {file_path} &")
-            elif platform.system() == "Windows":
-                try:
-                    import winsound
-                    winsound.PlaySound(file_path, winsound.SND_FILENAME)
-                except: pass
-        except: pass
-    threading.Thread(target=_run, daemon=True).start()
 
 class CameraRuntime:
     def __init__(self, cam_id: int, source: Any, ai_queue: multiprocessing.Queue):
@@ -79,7 +69,7 @@ class CameraRuntime:
         self.rec_start_time = 0
         self.code_context_cache = {}
         
-        # [MỚI] Biến xử lý Stop Delay
+        # Biến xử lý Stop Delay
         self.stop_deadline = 0.0     # Thời điểm sẽ thực sự dừng
         self.pending_stop_data = None # Dữ liệu (code, reason) để dừng sau 5s
         
@@ -90,13 +80,14 @@ class CameraRuntime:
         # TTS Config
         self.read_end_digits_count = 5
         self.last_spoken_code = None
+        self.last_code_speak_time = 0 # [NEW] Thời điểm đọc mã đơn gần nhất
 
         self._load_and_apply_settings()
         self.start()
 
     @property
     def recording(self) -> bool:
-        # [UPDATE] Đang quay nếu Machine Packing HOẶC đang trong thời gian chờ dừng (Delay 5s)
+        # Đang quay nếu Machine Packing HOẶC đang trong thời gian chờ dừng (Delay 5s)
         return (self.machine.state == MachineState.PACKING) or (self.stop_deadline > 0)
 
     def _emit_event(self, event_name, data):
@@ -189,6 +180,29 @@ class CameraRuntime:
             self.rec_start_time = time.time()
             final_note = note or (OrderNote.REPACK if parent_id else OrderNote.NEW_ORDER)
             
+            # [TTS LOGIC MỚI] Đọc Note có delay theo thứ tự: Code -> 2s -> Note
+            if note:
+                def _speak_note_delayed(note_text):
+                    # Thời gian dự kiến đọc xong mã đơn = last_code_speak_time + 3.5s (ước lượng)
+                    # Thời gian cần phát Note = thời gian đọc xong + 2.0s delay
+                    
+                    gap_delay = 2.0
+                    estimated_read_time = 3.5
+                    
+                    time_since_code = time.time() - self.last_code_speak_time
+                    
+                    # Nếu vừa mới đọc code (trong vòng 6s), thì chờ cho hết code + gap
+                    if time_since_code < (estimated_read_time + gap_delay):
+                        wait_time = (estimated_read_time + gap_delay) - time_since_code
+                        if wait_time > 0:
+                            time.sleep(wait_time)
+                            
+                    # Thực hiện đọc
+                    tts_service.speak(note_text)
+
+                # Chạy thread delay để không chặn luồng quay video
+                threading.Thread(target=_speak_note_delayed, args=(final_note,), daemon=True).start()
+
             self._emit_event("ORDER_CREATED", {
                 "code": code, 
                 "status": OrderStatus.PACKING, 
@@ -199,7 +213,6 @@ class CameraRuntime:
         except Exception as e: print(f"❌ Start Err: {e}")
 
     def _do_stop_order(self, code, reason):
-        # Hàm này thực hiện việc dừng recorder thực tế
         print(f"⚪ STOP REC: {code} ({reason})")
         video_path = self.recorder.stop()
         if self.current_order_db_id:
@@ -207,10 +220,35 @@ class CameraRuntime:
                 order_repo.cancel_order(self.current_order_db_id)
             else:
                 order_repo.close_order(self.current_order_db_id, reason)
+        
         if video_path and os.path.exists(video_path):
             vn_time = datetime.utcnow() + timedelta(hours=7)
             media_service.queue_video_conversion(video_path, code, vn_time, self.current_order_db_id)
         
+        # [TTS LOGIC] Đếm số đơn hoàn thành trong ngày
+        if reason not in [OrderNote.CHECKING_ONLY, OrderNote.SYSTEM_RESTART]:
+            try:
+                tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
+                now_vn = datetime.now(tz_vn)
+                start_of_day = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
+                end_of_day = now_vn.replace(hour=23, minute=59, second=59, microsecond=999999)
+                
+                start_naive = start_of_day.replace(tzinfo=None)
+                end_naive = end_of_day.replace(tzinfo=None)
+                
+                with SessionLocal() as db:
+                    count = db.query(func.count(distinct(models.Order.code))).filter(
+                        models.Order.status == OrderStatus.CLOSED,
+                        models.Order.created_at >= start_naive,
+                        models.Order.created_at <= end_naive
+                    ).scalar()
+                
+                if count:
+                    msg = f"Đã làm xong {count} đơn"
+                    tts_service.speak(msg)
+            except Exception as e:
+                print(f"❌ TTS Count Error: {e}")
+
         self._emit_event("ORDER_STOPPED", {"code": code, "note": reason})
         
         self.current_order_db_id = None
@@ -304,11 +342,15 @@ class CameraRuntime:
             self.last_scanned_time = now
             if now - self.last_scan_audio_time > self.SCAN_AUDIO_COOLDOWN:
                 self.last_scan_audio_time = now
+            
+            # [TTS] Đọc mã đơn
             if current_code != self.last_spoken_code:
                 n = self.read_end_digits_count
                 text_to_read = current_code[-n:] if len(current_code) > n else current_code
                 tts_service.speak(f"mã đơn {n} số cuối {text_to_read}")
+                
                 self.last_spoken_code = current_code
+                self.last_code_speak_time = time.time() # [NEW] Ghi lại thời điểm đọc code
 
         codes_for_machine = final_codes
         
@@ -321,10 +363,10 @@ class CameraRuntime:
                 is_old = False
                 pid = None
                 
-                # [LOGIC MỚI] Check xem đơn cũ có phải của HÔM NAY không
+                # [CHECK HÔM NAY] Chỉ coi là đơn cũ nếu tạo trong HÔM NAY
                 if ord_obj:
-                    # So sánh ngày tạo với ngày hiện tại
-                    if ord_obj.created_at.date() == datetime.now().date():
+                    today_date = datetime.now().date()
+                    if ord_obj.created_at.date() == today_date:
                         is_old = True
                         pid = ord_obj.parent_id if ord_obj.parent_id else ord_obj.id
                 
@@ -334,46 +376,39 @@ class CameraRuntime:
             if cache['is_old']:
                 # Nếu là đơn hôm nay -> Nối tiếp (Start luôn, bỏ qua delay stop nếu có)
                 if self.machine.force_start(code) == Action.START_ORDER:
-                    self._do_start_order(code, parent_id=cache['pid'])
+                    self._do_start_order(code, parent_id=cache['pid'], note=OrderNote.REPACK)
                     codes_for_machine = []
 
         # 3. State Machine Process
         state, action, code, reason = self.machine.process(codes_for_machine, human)
 
         if action == Action.START_ORDER:
-            # Code mới -> Start luôn (hủy delay stop nếu có trong _do_start_order)
+            # Code mới -> Start luôn
             self._do_start_order(code, note=OrderNote.NEW_ORDER)
             
         elif action == Action.STOP_ORDER:
-            # [LOGIC MỚI] Dừng đơn -> Kích hoạt Delay 5s thay vì dừng ngay
+            # Dừng đơn -> Kích hoạt Delay 5s
             note = OrderNote.MANUAL
             if reason == "TIMEOUT": note = OrderNote.TIMEOUT
             elif reason == "END_SHIFT": note = OrderNote.END_SHIFT
             
-            # Chỉ delay nếu lý do là nghiệp vụ bình thường (không phải lỗi hệ thống)
             print(f"⏳ Trigger Delayed Stop for {code} (5s)...")
             self.stop_deadline = now + 5.0
             self.pending_stop_data = (code, note)
-            # Lưu ý: Không gọi _do_stop_order ở đây. Nó sẽ được gọi ở đầu hàm _process_logic khi hết giờ.
             
         elif action == Action.SNAPSHOT:
             self._do_snapshot(frame, code)
             
         elif action == Action.SWITCH_ORDER:
-            # Chuyển đơn -> Dừng ngay đơn cũ (hủy delay), Start đơn mới
-            
-            # 1. Dừng ngay đơn cũ (nếu đang pending hoặc đang chạy)
+            # Chuyển đơn -> Dừng ngay đơn cũ, Start đơn mới
             if self.stop_deadline > 0 and self.pending_stop_data:
-                 # Nếu đang trong thời gian chờ dừng -> Dừng ngay lập tức
                  old_c, old_r = self.pending_stop_data
                  self._do_stop_order(old_c, old_r)
                  self.stop_deadline = 0
                  self.pending_stop_data = None
             else:
-                 # Nếu đang chạy bình thường -> Dừng ngay
                  self._do_stop_order(self.machine.last_closed_code, OrderNote.SCAN_NEW)
 
-            # 2. Start đơn mới
             self._do_start_order(code, note=OrderNote.NEW_ORDER)
 
         if state == MachineState.PACKING:
@@ -384,7 +419,6 @@ class CameraRuntime:
                     print(f"⚠️ C4: No human {silence:.1f}s -> Cancel")
                     self.machine.state = MachineState.IDLE
                     self.machine.current_code = None
-                    # Cancel thì dừng ngay, không delay
                     self._do_stop_order(code, OrderNote.CHECKING_ONLY)
 
     def _draw_overlay(self, frame):
@@ -395,18 +429,17 @@ class CameraRuntime:
             text = f"PACKING: {self.machine.current_code}"
             self.img_proc.draw_text(frame, text, 20, 50, (0, 255, 0))
         elif self.stop_deadline > 0:
-            # [UI] Hiển thị đếm ngược khi đang chờ dừng
             remain = max(0, self.stop_deadline - time.time())
             text = f"FINISHING... {remain:.1f}s"
-            self.img_proc.draw_text(frame, text, 20, 50, (0, 165, 255)) # Màu cam
+            self.img_proc.draw_text(frame, text, 20, 50, (0, 165, 255))
         elif self.last_scanned_code and (time.time() - self.last_scanned_time < 2.0):
             text = f"DETECTED: {self.last_scanned_code}"
             self.img_proc.draw_text(frame, text, 20, 50, (0, 255, 255))
             
         try:
             tz = pytz.timezone('Asia/Ho_Chi_Minh')
-            now_s = datetime.now(tz).strftime("%d/%m/%y %I:%M:%S %p")
+            now_s = datetime.now(tz).strftime("%d/%m/%Y %I:%M:%S %p")
             self.img_proc.draw_text(frame, now_s, self.target_w - 360, 50, (255, 255, 255))
         except:
-            now_s = datetime.now().strftime("%d/%m/%y %H:%M:%S")
+            now_s = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             self.img_proc.draw_text(frame, now_s, self.target_w - 280, 50, (255, 255, 255))

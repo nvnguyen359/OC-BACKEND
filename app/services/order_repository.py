@@ -74,7 +74,7 @@ class OrderRepository:
             if order and order.status == OrderStatus.PACKING:
                 order.status = OrderStatus.CLOSED
                 order.closed_at = datetime.now()
-                order.note = reason_enum # Lưu lý do đóng chuẩn
+                #order.note = reason_enum
                 db.commit()
         except Exception as e:
             print(f"❌ DB Error (close): {e}")
