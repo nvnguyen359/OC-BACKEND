@@ -5,6 +5,7 @@ import time
 import multiprocessing
 import signal
 import psutil
+import os
 from typing import Dict
 
 # --- IMPORTS ---
@@ -18,7 +19,17 @@ class CameraSystem:
         # Queue AI
         self.ai_input = multiprocessing.Queue(maxsize=10)
         self.ai_output = multiprocessing.Queue()
-        self.system_stats = {"cpu": 0.0, "ram": 0.0, "threads": 0}
+        
+        # [UPDATE] Thêm các trường cho Disk
+        self.system_stats = {
+            "cpu": 0.0, 
+            "ram": 0.0, 
+            "threads": 0,
+            "disk_total": 0.0,
+            "disk_used": 0.0,
+            "disk_free": 0.0,
+            "disk_percent": 0.0
+        }
         
         # Start AI Process
         self.ai_process = multiprocessing.Process(
@@ -96,13 +107,25 @@ class CameraSystem:
         p = psutil.Process()
         while self.is_system_running:
             try:
+                # [UPDATE] Lấy thông tin ổ cứng (phân vùng gốc /)
+                # Nếu chạy trên Windows, thay '/' bằng 'C:\\' hoặc ổ đĩa tương ứng
+                disk = psutil.disk_usage('/') 
+                
                 self.system_stats = {
                     "cpu": round(p.cpu_percent(), 1),
-                    "ram": round(p.memory_info().rss / 1048576, 1),
-                    "threads": threading.active_count()
+                    # RAM convert sang MB
+                    "ram": round(p.memory_info().rss / 1048576, 1), 
+                    "threads": threading.active_count(),
+                    # Disk convert sang GB
+                    "disk_total": round(disk.total / (1024**3), 1),
+                    "disk_used": round(disk.used / (1024**3), 1),
+                    "disk_free": round(disk.free / (1024**3), 1),
+                    "disk_percent": disk.percent
                 }
                 time.sleep(2)
-            except: pass
+            except Exception as e:
+                # print(f"⚠️ Stats Error: {e}")
+                pass
 
     def _listen_ai(self):
         while self.is_system_running:

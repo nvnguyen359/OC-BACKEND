@@ -244,7 +244,7 @@ class CameraRuntime:
                     ).scalar()
                 
                 if count:
-                    msg = f"Đã làm xong {count} đơn"
+                    msg = f"Đã làm xong {count} đơn hôm nay"
                     tts_service.speak(msg)
             except Exception as e:
                 print(f"❌ TTS Count Error: {e}")
@@ -354,19 +354,23 @@ class CameraRuntime:
 
         codes_for_machine = final_codes
         
-        # 2. Xử lý DB Check ("Today Only")
+        # 2. Xử lý DB Check (Check 4 Ngày)
         if self.machine.state == MachineState.IDLE and final_codes:
             code = final_codes[0]
             cache = self.code_context_cache.get(code)
+            
+            # Cache 10 phút để tránh query DB liên tục
             if not cache or (now - cache['ts'] > 600):
                 ord_obj = order_repo.get_latest_order_by_code(code)
                 is_old = False
                 pid = None
                 
-                # [CHECK HÔM NAY] Chỉ coi là đơn cũ nếu tạo trong HÔM NAY
                 if ord_obj:
-                    today_date = datetime.now().date()
-                    if ord_obj.created_at.date() == today_date:
+                    # [FIX Logic] Check khoảng cách ngày
+                    # < 4 ngày: Repack (Đóng thêm/bớt hàng) -> Nối parent_id
+                    # >= 4 ngày: Đơn hoàn (Return) -> Coi như đơn mới
+                    diff = datetime.now() - ord_obj.created_at
+                    if diff.days < 4:
                         is_old = True
                         pid = ord_obj.parent_id if ord_obj.parent_id else ord_obj.id
                 
@@ -374,7 +378,7 @@ class CameraRuntime:
                 self.code_context_cache[code] = cache
             
             if cache['is_old']:
-                # Nếu là đơn hôm nay -> Nối tiếp (Start luôn, bỏ qua delay stop nếu có)
+                # Nếu là đơn Repack (<4 ngày) -> Nối tiếp (Start luôn, bỏ qua delay stop nếu có)
                 if self.machine.force_start(code) == Action.START_ORDER:
                     self._do_start_order(code, parent_id=cache['pid'], note=OrderNote.REPACK)
                     codes_for_machine = []

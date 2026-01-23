@@ -17,7 +17,7 @@ from app.core.docs_utils import custom_swagger_ui_html_response
 # [NEW] Import cấu hình Media Dynamic từ DB
 from app.core.media_config import configure_static_media
 
-from scripts.check_db import main as check_db_main
+from app.core.check_db import main as check_db_main
 from app.workers.run_worker import start_all_workers, stop_all_workers
 from app.services.socket_service import socket_service
 import asyncio

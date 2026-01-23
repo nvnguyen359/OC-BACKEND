@@ -1,4 +1,4 @@
-# scripts/check_db.py
+#corecheck_db.py
 import sys
 import os
 from passlib.hash import argon2
@@ -9,11 +9,10 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 root_dir = os.path.dirname(current_dir)
 sys.path.append(root_dir)
 
-from app.core.config import settings
-from app.db.session import engine, SessionLocal
-from app.db.base import Base
+from app.core.config import settings  # noqa: E402
+from app.db.session import engine, SessionLocal  # noqa: E402
+from app.db.base import Base  # noqa: E402
 # Import toàn bộ models để Base.metadata nhận diện được tất cả các bảng (User, Camera, Order, Setting)
-from app.db import models 
 
 def init_db_tables():
     """
