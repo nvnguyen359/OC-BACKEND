@@ -1,7 +1,7 @@
 import cv2
 
 # Chọn index camera (0 hoặc 1, 2...)
-CAM_INDEX = 1 
+CAM_INDEX = 0
 
 def nothing(x): pass
 

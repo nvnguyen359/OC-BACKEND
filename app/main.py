@@ -1,10 +1,23 @@
 # app/main.py
 
-import uvicorn
+import sys
+import os
 from pathlib import Path
+from contextlib import asynccontextmanager # [NEW] Cần thiết cho Lifespan
+
+# ==============================================================================
+# [FIX PATH] TỰ ĐỘNG THÊM ROOT VÀO SYS.PATH
+# Giúp chạy được cả lệnh: "python app/main.py" mà không lỗi ModuleNotFoundError
+# ==============================================================================
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+import uvicorn
+import asyncio
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 
 # --- Import nội bộ ---
@@ -13,30 +26,81 @@ from app.core.auth_middleware import AuthMiddleware
 from app.core.router_loader import auto_include_routers
 from app.core.openapi_config import configure_openapi
 from app.core.docs_utils import custom_swagger_ui_html_response
-
-# [NEW] Import cấu hình Media Dynamic từ DB
 from app.core.media_config import configure_static_media
-
 from app.core.check_db import main as check_db_main
-from app.workers.run_worker import start_all_workers, stop_all_workers
 from app.services.socket_service import socket_service
-import asyncio
+
+# [QUAN TRỌNG] Đã xóa dòng import worker ở đây để tránh lỗi Circular Import
+# from app.workers.run_worker import ... (DELETE)
+
 # ==========================================
-# 1. CẤU HÌNH ĐƯỜNG DẪN
+# 1. LIFESPAN (QUẢN LÝ KHỞI ĐỘNG & TẮT)
+# ==========================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Hàm này thay thế cho @app.on_event("startup") và shutdown.
+    Giúp tránh cảnh báo DeprecationWarning và lỗi import vòng vo.
+    """
+    # --- PHẦN STARTUP ---
+    print(f"🚀 API Server running at http://{settings.HOST}:{settings.PORT}")
+    
+    # Gán Event Loop cho Socket Service
+    try:
+        socket_service.set_loop(asyncio.get_running_loop())
+    except: pass
+
+    print("✅ [BOOT] Starting System Modules...")
+    
+    # 1. Kiểm tra Database & Cấu hình Media
+    try:
+        check_db_main()
+        configure_static_media(app)
+    except Exception as e:
+        print(f"⚠️ [BOOT] Database/Config Warning: {e}")
+
+    # 2. Load toàn bộ API Routers
+    auto_include_routers(app)
+    
+    # 3. Cấu hình Docs (Swagger UI)
+    configure_openapi(app)
+
+    # 4. Bật Worker (Camera, AI...) - [LAZY IMPORT TẠI ĐÂY]
+    print("🔄 [BOOT] Initializing Background Workers...")
+    try:
+        # Import ở đây để phá vỡ vòng lặp import (Circular Dependency)
+        from app.workers.run_worker import start_all_workers
+        start_all_workers()
+    except Exception as e:
+        print(f"❌ [BOOT] Worker Start Failed: {e}")
+
+    # --- APP CHẠY TẠI ĐÂY ---
+    yield 
+    # --- APP DỪNG TẠI ĐÂY ---
+
+    # --- PHẦN SHUTDOWN ---
+    print("👋 API Server shutting down...")
+    try:
+        from app.workers.run_worker import stop_all_workers
+        stop_all_workers()
+    except: pass
+
+
+# ==========================================
+# 2. KHỞI TẠO APP
 # ==========================================
 APP_DIR = Path(__file__).resolve().parent
 DOCS_DIR = APP_DIR / "docs"
-CLIENT_DIR = APP_DIR.parent / "client" / "browser"
 
-# 2. Khởi tạo App
 app = FastAPI(
-    title="API Documentation",
-    version="1.0.0",
-    docs_url=None,
-    redoc_url=None
+    title="Order Camera AI API",
+    version="2.0.0",
+    docs_url=None, # Tắt docs mặc định để dùng Custom Swagger
+    redoc_url=None,
+    lifespan=lifespan # [NEW] Đăng ký hàm lifespan ở trên vào đây
 )
 
-# 3. Middleware
+# 3. MIDDLEWARE
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS, 
@@ -47,41 +111,7 @@ app.add_middleware(
 app.add_middleware(AuthMiddleware)
 
 # ==========================================
-# 4. LOAD CONFIG & MEDIA
-# ==========================================
-
-# [FIX] Cấu hình Media Dynamic (OC-media) dựa trên DB
-# Việc này giúp URL ảnh đúng chuẩn: http://host:port/OC-media/avatars/xxx.jpg
-configure_static_media(app)
-
-# Load Routers & OpenAPI
-auto_include_routers(app) 
-configure_openapi(app)
-
-# ==========================================
-# 5. STARTUP & SHUTDOWN EVENTS
-# ==========================================
-@app.on_event("startup")
-async def startup_event():
-    print(f"🚀 Server running at http://{settings.HOST}:{settings.PORT}")
-    socket_service.set_loop(asyncio.get_running_loop())
-    # 1. Check DB
-    try:
-        check_db_main()
-    except Exception as e:
-        print(f"⚠️ Warning: Check DB failed: {e}")
-
-    # 2. Bật toàn bộ Worker (Camera, AI, UpsertDB)
-    start_all_workers()
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Tắt toàn bộ Worker sạch sẽ
-    stop_all_workers()
-
-# ==========================================
-# 6. SWAGGER UI
+# 3. SWAGGER UI (Custom)
 # ==========================================
 @app.get("/docs", include_in_schema=False)
 async def docs_page():
@@ -91,27 +121,6 @@ async def docs_page():
         docs_dir=DOCS_DIR
     )
 
-# ==========================================
-# 7. SERVE FRONTEND (SPA)
-# ==========================================
-if CLIENT_DIR.exists():
-    # Mount assets của frontend
-    if (CLIENT_DIR / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=str(CLIENT_DIR / "assets")), name="assets")
-
-    # Catch-all route cho SPA (Angular/React)
-    @app.get("/{file_path:path}", include_in_schema=False)
-    async def serve_spa(file_path: str):
-        # Tránh conflict với API hoặc OpenAPI
-        if file_path.startswith("api/") or file_path == "openapi.json":
-             return JSONResponse({"detail": "Not Found"}, status_code=404)
-
-        file_location = CLIENT_DIR / file_path
-        if file_location.is_file():
-            return FileResponse(file_location)
-        
-        # Mặc định trả về index.html để Router frontend xử lý
-        return FileResponse(CLIENT_DIR / "index.html")
-
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=settings.RELOAD)
+    # Reload=True để ổn định khi Dev
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)

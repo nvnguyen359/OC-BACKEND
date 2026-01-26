@@ -2,9 +2,18 @@
 
 import os
 import json 
+from pathlib import Path
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# [FIX] XÁC ĐỊNH ĐƯỜNG DẪN TUYỆT ĐỐI TỚI FILE .ENV
+# __file__ = .../app/core/config.py
+# .parent  = .../app/core
+# .parent.parent = .../app
+# .parent.parent.parent = .../ (Thư mục gốc chứa .env)
+BASE_DIR = Path(__file__).resolve().parent.parent
+ENV_PATH = BASE_DIR / ".env"
 
 class Settings(BaseSettings):
     # Server config
@@ -13,10 +22,10 @@ class Settings(BaseSettings):
     RELOAD: bool = True
 
     # Database
-    DB_URL: str
+    DB_URL: str = "sqlite:///./app/db/adocv1.db"
 
     # JWT config (CHỮ IN HOA)
-    JWT_SECRET: str
+    JWT_SECRET: str = "default_secret_key"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 6000
 
@@ -37,6 +46,7 @@ class Settings(BaseSettings):
     @classmethod
     def parse_allowed_origins(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str):
+            if not v: return []
             if v.strip().startswith("["):
                 try:
                     return json.loads(v)
@@ -48,7 +58,8 @@ class Settings(BaseSettings):
         return []
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # [QUAN TRỌNG] Trỏ thẳng vào đường dẫn tuyệt đối của file .env
+        env_file=str(ENV_PATH),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"
@@ -56,3 +67,11 @@ class Settings(BaseSettings):
 
 # Khởi tạo settings ở cuối file
 settings = Settings()
+
+# [DEBUG LOG] In ra để kiểm tra
+print("---------------------------------------------------")
+print(f"✅ [Config] Config File: {__file__}")
+print(f"✅ [Config] Env Path Target: {ENV_PATH}")
+print(f"✅ [Config] Env Exists: {ENV_PATH.exists()}")
+print(f"🔓 [Config] ALLOWED_ORIGINS: {settings.ALLOWED_ORIGINS}")
+print("---------------------------------------------------")

@@ -5,7 +5,7 @@ import time
 import platform
 import sys
 
-# 1. CẤU HÌNH TẮT LOG RÁC (Vẫn giữ)
+# 1. CẤU HÌNH TẮT LOG RÁC
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 os.environ["OPENCV_VIDEOIO_DEBUG"] = "0"
 os.environ["OPENCV_VIDEOIO_PRIORITY_OBSENSOR"] = "0"
@@ -17,45 +17,14 @@ try:
     from app.db.session import SessionLocal 
     from app.crud.camera_crud import camera_crud
     from app.db import schemas
-    from app.workers.camera_worker import camera_system 
+    from app.workers.camera_worker import camera_system
+    
+    # [QUAN TRỌNG] Import khóa và class từ camera_stream
+    # Class này đã được FIX (bỏ os.dup2) nên sẽ không gây lỗi PermissionError nữa
+    from app.workers.camera_stream import FailsafeSuppressStderr, _global_cam_lock
 except ImportError:
     SessionLocal = None; camera_crud = None; schemas = None; camera_system = None
-
-# ==============================================================================
-# [MỚI] CLASS CHẶN LOG C++ (STDERR)
-# ==============================================================================
-class FailsafeSuppressStderr:
-    """
-    Context Manager để chuyển hướng stderr sang devnull tạm thời.
-    Giúp chặn các log Warning từ tầng C++ của OpenCV.
-    """
-    def __enter__(self):
-        self.active = False
-        try:
-            # Flush để đảm bảo log cũ đã in hết
-            sys.stderr.flush()
-            # Lưu file descriptor hiện tại của stderr
-            self.err_fd = sys.stderr.fileno()
-            self.saved_err_fd = os.dup(self.err_fd)
-            # Mở null device
-            self.devnull = os.open(os.devnull, os.O_RDWR)
-            # Gán stderr vào null device
-            os.dup2(self.devnull, self.err_fd)
-            self.active = True
-        except Exception:
-            # Nếu môi trường không hỗ trợ fileno (VD: một số IDE console), bỏ qua
-            pass
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        if self.active:
-            try:
-                sys.stderr.flush()
-                # Khôi phục stderr cũ
-                os.dup2(self.saved_err_fd, self.err_fd)
-                os.close(self.saved_err_fd)
-                os.close(self.devnull)
-            except Exception:
-                pass
+    FailsafeSuppressStderr = None; _global_cam_lock = None
 
 # ==============================================================================
 # Helper: Ping thiết bị vật lý
@@ -63,19 +32,36 @@ class FailsafeSuppressStderr:
 def check_physical_device(os_index: int) -> bool:
     if cv2 is None: return False
     is_opened = False
+    cap = None
     try:
-        # Windows dùng CAP_DSHOW hoặc CAP_ANY
         backend = cv2.CAP_DSHOW if platform.system() == 'Windows' else cv2.CAP_V4L2
         
-        # [ÁP DỤNG TẠI ĐÂY] Bọc hàm mở camera trong SuppressStderr
-        with FailsafeSuppressStderr():
-            cap = cv2.VideoCapture(os_index, backend)
-        
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                is_opened = True
-            cap.release()
+        # [FIX] Dùng _global_cam_lock để xếp hàng, tránh đánh nhau với CameraRuntime
+        lock_acquired = False
+        if _global_cam_lock:
+            # Chờ tối đa 2s để lấy khóa
+            lock_acquired = _global_cam_lock.acquire(timeout=2.0)
+            
+        try:
+            # Chỉ mở cam nếu lấy được khóa hoặc đang test đơn lẻ
+            if lock_acquired or (_global_cam_lock is None):
+                if FailsafeSuppressStderr:
+                    with FailsafeSuppressStderr():
+                        cap = cv2.VideoCapture(os_index, backend)
+                else:
+                    cap = cv2.VideoCapture(os_index, backend)
+                
+                if cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        is_opened = True
+        finally:
+            if cap: cap.release()
+            if lock_acquired and _global_cam_lock:
+                _global_cam_lock.release()
+            
+            # Ngủ ngắn để Windows giải phóng driver
+            time.sleep(0.5)
     except: 
         pass
     return is_opened
@@ -133,18 +119,14 @@ class UpsertCameraWorker:
                     if idx is not None:
                         existing_cams[idx] = cam
 
-                # Quét Index
                 for idx in range(self.max_scan_index + 1):
                     is_alive = False
                     
-                    # 1. Check System (Ưu tiên)
                     if is_system_using_index(idx):
                         is_alive = True
                     else:
-                        # 2. Check Vật lý (Đã bọc chống log)
                         is_alive = check_physical_device(idx)
 
-                    # Logic Upsert
                     if is_alive:
                         if idx in existing_cams:
                             cam = existing_cams[idx]
@@ -161,9 +143,10 @@ class UpsertCameraWorker:
                         if idx in existing_cams:
                             cam = existing_cams[idx]
                             if cam.status == 'ACTIVE':
-                                print(f"❌ [Disconnect] Camera {idx} unplugged.")
+                                print(f"❌ [Disconnect] Camera {idx} unplugged (Status Only).")
                                 self._update_db(db, cam, 'DISCONNECTED', 0)
-                                self._sync_system(cam.id, idx, 'STOP')
+                                # Không gọi lệnh STOP để tránh xung đột
+                                # self._sync_system(cam.id, idx, 'STOP')
 
             except Exception: pass
             finally:

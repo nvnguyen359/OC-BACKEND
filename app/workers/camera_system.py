@@ -20,7 +20,7 @@ class CameraSystem:
         self.ai_input = multiprocessing.Queue(maxsize=10)
         self.ai_output = multiprocessing.Queue()
         
-        # [UPDATE] Thêm các trường cho Disk
+        # Thống kê tài nguyên hệ thống
         self.system_stats = {
             "cpu": 0.0, 
             "ram": 0.0, 
@@ -32,6 +32,7 @@ class CameraSystem:
         }
         
         # Start AI Process
+        # Daemon=True để tự tắt khi app chính tắt
         self.ai_process = multiprocessing.Process(
             target=run_ai_process, args=(self.ai_input, self.ai_output, "yolov8n.pt"), daemon=True
         )
@@ -39,6 +40,7 @@ class CameraSystem:
         
         self.is_system_running = True 
         try: 
+            # Bắt tín hiệu Ctrl+C để dừng sạch sẽ
             signal.signal(signal.SIGINT, lambda s, f: (self.shutdown(), sys.exit(0)))
         except ValueError: pass
         
@@ -51,7 +53,11 @@ class CameraSystem:
 
     def _startup_load_cameras(self):
         """Load danh sách camera từ DB và khởi chạy background."""
-        time.sleep(3) # Đợi 3s cho DB/App khởi động ổn định
+        
+        # [TỐI ƯU ORANGE PI] Đợi 5s để API Server và DB khởi động ổn định hoàn toàn
+        # Tránh việc chiếm CPU ngay khi vừa boot
+        time.sleep(5) 
+        
         print("🔄 [System] Auto-loading cameras from Database...")
         
         db = SessionLocal()
@@ -93,6 +99,11 @@ class CameraSystem:
                     self.add_camera(cam.id, source)
                     active_count += 1
                     
+                    # [TỐI ƯU ORANGE PI] QUAN TRỌNG NHẤT:
+                    # Ngủ 3 giây giữa mỗi lần bật camera.
+                    # Giúp CPU có thời gian nghỉ, không bị spike 100% làm treo Web UI.
+                    time.sleep(3.0) 
+                    
                 except Exception as e:
                     print(f"❌ [System] Failed to start Cam {cam.id}: {e}")
             
@@ -108,8 +119,9 @@ class CameraSystem:
         while self.is_system_running:
             try:
                 # [UPDATE] Lấy thông tin ổ cứng (phân vùng gốc /)
-                # Nếu chạy trên Windows, thay '/' bằng 'C:\\' hoặc ổ đĩa tương ứng
-                disk = psutil.disk_usage('/') 
+                # Nếu chạy trên Windows, thay '/' bằng 'C:\\'
+                disk_path = '/' if os.name != 'nt' else 'C:\\'
+                disk = psutil.disk_usage(disk_path) 
                 
                 self.system_stats = {
                     "cpu": round(p.cpu_percent(), 1),
@@ -122,6 +134,7 @@ class CameraSystem:
                     "disk_free": round(disk.free / (1024**3), 1),
                     "disk_percent": disk.percent
                 }
+                # Check mỗi 2 giây
                 time.sleep(2)
             except Exception as e:
                 # print(f"⚠️ Stats Error: {e}")
@@ -130,13 +143,14 @@ class CameraSystem:
     def _listen_ai(self):
         while self.is_system_running:
             try:
+                # Timeout ngắn để check biến is_system_running thường xuyên
                 r = self.ai_output.get(timeout=0.5)
                 if r['cam_id'] in self.cameras:
                     self.cameras[r['cam_id']].ai_metadata = r.get('data', [])
             except: pass
 
     # =================================================================
-    # [FIX] Logic Thêm Camera thông minh hơn
+    # Logic Thêm/Xóa Camera
     # =================================================================
     def add_camera(self, cid, src):
         if cid in self.cameras: 
@@ -166,7 +180,9 @@ class CameraSystem:
     def shutdown(self):
         print("🔻 [System] Shutting down...")
         self.is_system_running = False
+        # Dừng tất cả camera con
         for c in list(self.cameras.values()): c.stop()
+        # Dừng tiến trình AI
         if self.ai_process.is_alive(): self.ai_process.terminate()
 
 # Singleton Instance

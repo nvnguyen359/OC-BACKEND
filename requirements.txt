@@ -29,5 +29,6 @@ pytest
 httpx
 psutil
 gTTS
+python-dotenv
 # pip install -r requirements.txt
 # uvicorn app.main:app --reload

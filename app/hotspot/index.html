@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cấu Hình Order Camera AI</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>⚙️ Cấu Hình Thiết Bị</h1>
+        
+        <div class="tabs">
+            <div class="tab active" onclick="switchTab('wifi')">📶 Kết Nối Wifi</div>
+            <div class="tab" onclick="switchTab('camera')">📷 Test Camera</div>
+        </div>
+
+        <div id="msgBox" class="status-box"></div>
+
+        <div id="tab-wifi" class="tab-content active">
+            <div class="card">
+                <h2>Chọn Mạng Wifi</h2>
+                <button class="btn" onclick="scanWifi()" id="btnScan">🔍 Quét Mạng Xung Quanh</button>
+                <div style="margin-top: 10px;">
+                    <ul id="wifiList" class="wifi-list"></ul>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Thông Tin Kết Nối</h2>
+                <div class="input-group">
+                    <label>Tên Wifi (SSID)</label>
+                    <input type="text" id="ssid" placeholder="Chọn từ danh sách hoặc nhập...">
+                </div>
+                <div class="input-group">
+                    <label>Mật Khẩu</label>
+                    <input type="password" id="password" placeholder="Nhập mật khẩu wifi...">
+                </div>
+                <button class="btn" onclick="connectWifi()" id="btnConnect">Kết Nối & Khởi Động Lại</button>
+            </div>
+        </div>
+
+        <div id="tab-camera" class="tab-content">
+            <div class="card">
+                <h2>Kiểm Tra Luồng Camera</h2>
+                <p style="font-size: 0.9em; color: #666; margin-bottom: 10px;">Nhập link RTSP để kiểm tra xem Orange Pi có đọc được không.</p>
+                <div class="input-group">
+                    <label>RTSP URL</label>
+                    <input type="text" id="rtspUrl" value="rtsp://admin:123456@192.168.1.10:554/stream1">
+                </div>
+                <button class="btn" onclick="testCamera()" id="btnTestCam">Kiểm Tra Kết Nối</button>
+                <div id="camResult" style="margin-top: 15px; font-size: 0.9rem;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+/* app/hotspot/style.css */
+:root { --primary: #2563eb; --bg: #f3f4f6; --card: #ffffff; --text: #1f2937; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; display: flex; justify-content: center; }
+.container { max-width: 480px; width: 100%; }
+.card { background: var(--card); border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); padding: 24px; margin-bottom: 20px; }
+h1 { font-size: 1.5rem; font-weight: 700; text-align: center; margin-bottom: 1.5rem; color: var(--primary); }
+h2 { font-size: 1.1rem; margin-bottom: 1rem; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; }
+.btn { display: block; width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: 0.2s; font-size: 1rem; }
+.btn:active { transform: scale(0.98); opacity: 0.9; }
+.btn:disabled { background: #9ca3af; cursor: not-allowed; }
+.input-group { margin-bottom: 16px; }
+label { display: block; margin-bottom: 6px; font-weight: 500; font-size: 0.9rem; }
+input, select { width: 100%; padding: 10px; border: 1px solid #d1d5db; border-radius: 8px; box-sizing: border-box; font-size: 1rem; }
+.wifi-list { list-style: none; padding: 0; margin: 0; max-height: 200px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; display: none; }
+.wifi-item { padding: 10px; border-bottom: 1px solid #f3f4f6; cursor: pointer; display: flex; justify-content: space-between; }
+.wifi-item:last-child { border-bottom: none; }
+.wifi-item:hover { background: #eff6ff; }
+.wifi-signal { color: #2563eb; font-weight: bold; }
+.status-box { padding: 12px; border-radius: 8px; background: #fee2e2; color: #991b1b; text-align: center; margin-bottom: 20px; font-weight: 500; display: none; }
+.spinner { border: 3px solid #f3f3f3; border-top: 3px solid var(--primary); border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; vertical-align: middle; margin-right: 8px; }
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+.tabs { display: flex; margin-bottom: 20px; background: #e5e7eb; border-radius: 8px; padding: 4px; }
+.tab { flex: 1; text-align: center; padding: 8px; cursor: pointer; border-radius: 6px; font-weight: 500; color: #6b7280; }
+.tab.active { background: white; color: var(--primary); shadow: 0 1px 2px rgba(0,0,0,0.1); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
