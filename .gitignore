@@ -147,3 +147,4 @@ cython_debug/
 /OC-media
 /videos
 /app/media/tts_cache
+/*.db
