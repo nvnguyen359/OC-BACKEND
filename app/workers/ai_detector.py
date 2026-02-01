@@ -6,55 +6,73 @@ import signal
 import numpy as np
 from multiprocessing import Queue
 
-# --- CẤU HÌNH TỐI ƯU ORANGE PI 3 ---
+# --- CẤU HÌNH HỆ THỐNG ---
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
-os.environ["FOR_DISABLE_CONSOLE_CTRL_HANDLER"] = "1"
 
-# Import OpenCV
-try: import cv2
-except ImportError: cv2 = None
+# 1. IMPORT OPENCV
+try: 
+    import cv2
+    print("✅ [AI Check] OpenCV imported successfully.")
+except ImportError as e: 
+    cv2 = None
+    print(f"❌ [AI Check] OpenCV MISSING: {e}")
 
-# Import YOLO (Optional)
+# 2. IMPORT YOLO (HUMAN DETECTION)
 try: 
     from ultralytics import YOLO
     import torch
     torch.set_num_threads(1)
-except ImportError: 
+    HAS_YOLO = True
+    print("✅ [AI Check] Ultralytics (YOLO) imported successfully.")
+except ImportError as e: 
     YOLO = None
+    HAS_YOLO = False
+    print(f"❌ [AI Check] Ultralytics MISSING (No Human Detect): {e}")
 
-# Import Pyzbar
+# 3. IMPORT PYZBAR (QR/BARCODE)
 try:
     from pyzbar import pyzbar
     from pyzbar.pyzbar import ZBarSymbol
-except ImportError:
+    HAS_ZBAR = True
+    print("✅ [AI Check] Pyzbar imported successfully.")
+except ImportError as e:
     pyzbar = None
+    HAS_ZBAR = False
+    print(f"❌ [AI Check] Pyzbar MISSING. Run 'apt install libzbar0'. Error: {e}")
 
 def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
     """
-    Tiến trình AI: Tối ưu cho việc đọc mã xa 40cm+ bằng Sharpening & Upscaling.
+    Tiến trình AI độc lập: Xử lý QR Code và Phát hiện người (Human Detection)
     """
+    # Bỏ qua tín hiệu Interrupt để tiến trình cha (Main) quản lý việc đóng
     try: signal.signal(signal.SIGINT, signal.SIG_IGN)
     except: pass
 
     print(f"🤖 [AI Process] Started. PID: {os.getpid()}")
     
-    # 1. Load YOLO (Chỉ dùng detect người)
+    # --- LOAD MODEL YOLO ---
     model = None
-    if YOLO:
-        try: 
-            model = YOLO(model_path)
-            print(f"✅ [AI Process] YOLO Loaded.")
-        except Exception as e: 
-            print(f"⚠️ [AI Process] YOLO Error: {e}")
+    if HAS_YOLO:
+        if os.path.exists(model_path):
+            try: 
+                model = YOLO(model_path)
+                print(f"✅ [AI Process] YOLO Model Loaded: {model_path}")
+            except Exception as e: 
+                print(f"❌ [AI Process] Failed to load YOLO: {e}")
+        else:
+            print(f"❌ [AI Process] Weights not found: {model_path}")
 
-    # 2. Ma trận làm nét (Sharpen Kernel) - QUAN TRỌNG CHO MÃ MỜ/XA
-    # Giúp làm rõ cạnh các chấm QR code
+    # Ma trận làm nét ảnh (Laplacian-based sharpen)
     sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
+    
+    # Khởi tạo bộ cân bằng ánh sáng cục bộ (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if cv2 else None
 
     while True:
         try:
             try:
+                # Lấy dữ liệu từ hàng đợi (timeout để tránh treo tiến trình)
                 frame_data = input_queue.get(timeout=0.1)
             except:
                 continue
@@ -66,68 +84,49 @@ def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
             
             if img is None: continue
 
+            # Tính toán tỉ lệ scale để trả về tọa độ chính xác cho UI
             h_input, w_input = img.shape[:2]
             scale_x = target_w / w_input if w_input > 0 else 1.0
             scale_y = target_h / h_input if h_input > 0 else 1.0
 
             detections = []
             
-            # ==================================================================
-            # 1. QR CODE / BARCODE (CHIẾN THUẬT ZOOM SỐ & LÀM NÉT)
-            # ==================================================================
-            if pyzbar and cv2:
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                decoded_objects = []
-                
-                # --- BƯỚC 1: QUÉT NHANH TRÊN ẢNH GỐC ĐÃ LÀM NÉT ---
-                # Làm nét ảnh trước khi quét. Giúp đọc được mã ở xa mà không cần crop.
-                # Đây là bước quan trọng nhất cho trường hợp của bạn.
-                gray_sharp = cv2.filter2D(gray, -1, sharpen_kernel)
-                
-                decoded_objects = pyzbar.decode(gray_sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
-                
-                # --- BƯỚC 2: NẾU KHÔNG THẤY -> CẮT RỘNG & PHÓNG TO (DIGITAL ZOOM) ---
-                # Nếu mã quá nhỏ, ta cắt vùng bàn làm việc (Rộng 90%, Cao 60%)
-                # Sau đó phóng to 2 lần (Upscale) để pyzbar nhìn rõ hơn.
-                if not decoded_objects:
-                    # Cắt vùng rộng hơn (tránh bị mất mã nếu mã nằm lệch như trong ảnh)
-                    crop_h_ratio = 0.6  # Lấy 60% chiều cao (vùng giữa)
-                    crop_w_ratio = 0.9  # Lấy 90% chiều rộng (gần hết chiều ngang)
+            # ------------------------------------------------------------------
+            # 1. XỬ LÝ QUÉT MÃ (QR CODE & BARCODE)
+            # ------------------------------------------------------------------
+            if HAS_ZBAR and cv2:
+                try:
+                    # Chuyển xám và tăng cường độ tương phản
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    gray_enhanced = clahe.apply(gray) if clahe else gray
                     
-                    crop_h = int(h_input * crop_h_ratio)
-                    crop_w = int(w_input * crop_w_ratio)
+                    # Làm nét để các vạch mã rõ ràng hơn
+                    gray_sharp = cv2.filter2D(gray_enhanced, -1, sharpen_kernel)
                     
-                    # Tọa độ bắt đầu cắt
-                    start_y = (h_input - crop_h) // 2
-                    start_x = (w_input - crop_w) // 2
+                    # Thử quét lần 1: Toàn màn hình
+                    decoded_objects = pyzbar.decode(gray_sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
                     
-                    # Cắt ảnh
-                    roi = gray[start_y:start_y+crop_h, start_x:start_x+crop_w]
-                    
-                    # PHÓNG TO 2 LẦN (Upscale) - Bí quyết đọc mã xa
-                    # Mã 40px sẽ thành 80px -> Dễ đọc hơn hẳn
-                    roi_zoomed = cv2.resize(roi, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_LINEAR)
-                    
-                    # Làm nét vùng đã phóng to
-                    roi_zoomed_sharp = cv2.filter2D(roi_zoomed, -1, sharpen_kernel)
-                    
-                    # Thử quét trên ảnh phóng to
-                    decoded_roi = pyzbar.decode(roi_zoomed_sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
-                    
-                    # Map lại tọa độ từ ảnh phóng to về ảnh gốc
-                    for obj in decoded_roi:
-                        try:
+                    # Nếu không thấy -> Thử Zoom 1.5x vùng trung tâm (giữ nguyên tỉ lệ)
+                    if not decoded_objects:
+                        crop_h, crop_w = int(h_input * 0.7), int(w_input * 0.7)
+                        start_y, start_x = (h_input - crop_h) // 2, (w_input - crop_w) // 2
+                        
+                        roi = gray_enhanced[start_y:start_y+crop_h, start_x:start_x+crop_w]
+                        
+                        # Phóng to vùng trung tâm bằng nội suy Cubic để giữ độ sắc nét
+                        roi_zoomed = cv2.resize(roi, None, fx=1.5, fy=1.5, interpolation=cv2.INTER_CUBIC)
+                        roi_zoomed_sharp = cv2.filter2D(roi_zoomed, -1, sharpen_kernel)
+                        
+                        decoded_roi = pyzbar.decode(roi_zoomed_sharp, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
+                        
+                        for obj in decoded_roi:
                             content = obj.data.decode("utf-8")
-                            # Tọa độ trên ảnh phóng to
                             zx, zy, zw, zh = obj.rect
                             
-                            # Chia 2 để về kích thước vùng cắt
-                            real_roi_x = zx // 2
-                            real_roi_y = zy // 2
-                            real_roi_w = zw // 2
-                            real_roi_h = zh // 2
+                            # Map tọa độ từ ảnh Zoom về ảnh gốc ban đầu
+                            real_roi_x, real_roi_y = int(zx / 1.5), int(zy / 1.5)
+                            real_roi_w, real_roi_h = int(zw / 1.5), int(zh / 1.5)
                             
-                            # Cộng bù tọa độ cắt để ra tọa độ ảnh gốc
                             final_x = start_x + real_roi_x
                             final_y = start_y + real_roi_y
                             
@@ -139,15 +138,12 @@ def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
                                 ],
                                 "label": content,
                                 "code": content, 
-                                "code_type": obj.type,
+                                "code_type": str(obj.type),
                                 "color": "#2ecc71"
                             })
-                        except: pass
-                
-                # Nếu bước 1 tìm thấy (trên ảnh gốc làm nét)
-                else:
-                    for obj in decoded_objects:
-                        try:
+                    else:
+                        # Kết quả quét toàn màn hình thành công
+                        for obj in decoded_objects:
                             content = obj.data.decode("utf-8")
                             x, y, w, h = obj.rect
                             detections.append({
@@ -158,36 +154,42 @@ def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
                                 ],
                                 "label": content,
                                 "code": content, 
-                                "code_type": obj.type,
+                                "code_type": str(obj.type),
                                 "color": "#2ecc71"
                             })
-                        except: pass
+                except Exception as e:
+                    print(f"⚠️ [AI QR] Scan Error: {e}")
 
-            # ==================================================================
-            # 2. HUMAN DETECTION (YOLO - GIẢM TẢI)
-            # ==================================================================
+            # ------------------------------------------------------------------
+            # 2. XỬ LÝ PHÁT HIỆN NGƯỜI (HUMAN DETECTION)
+            # ------------------------------------------------------------------
             if model:
-                # Giảm ảnh xuống 320 để nhẹ máy, tập trung CPU cho QR
-                results = model.predict(img, imgsz=320, conf=0.5, verbose=False, classes=[0], device='cpu')
-                for r in results:
-                    for box in r.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        detections.append({
-                            "type": "human",
-                            "box": [
-                                int(x1 * scale_x), int(y1 * scale_y), 
-                                int((x2 - x1) * scale_x), int((y2 - y1) * scale_y)
-                            ], 
-                            "label": f"Human {int(box.conf[0]*100)}%",
-                            "color": "#e74c3c"
-                        })
+                try:
+                    # Predict với imgsz nhỏ để tăng tốc độ trên CPU (Orange Pi/PC)
+                    results = model.predict(img, imgsz=320, conf=0.5, verbose=False, classes=[0], device='cpu')
+                    for r in results:
+                        for box in r.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0].tolist()
+                            detections.append({
+                                "type": "human",
+                                "box": [
+                                    int(x1 * scale_x), int(y1 * scale_y), 
+                                    int((x2 - x1) * scale_x), int((y2 - y1) * scale_y)
+                                ], 
+                                "label": f"Human {int(box.conf[0]*100)}%",
+                                "color": "#e74c3c"
+                            })
+                except Exception as e:
+                    print(f"⚠️ [AI YOLO] Error: {e}")
 
+            # Gửi toàn bộ metadata phát hiện được về Main Process
             if not output_queue.full():
                 output_queue.put({'cam_id': cam_id, 'data': detections})
 
         except KeyboardInterrupt:
             break
-        except Exception: 
+        except Exception as e: 
+            print(f"⚠️ [AI Process] Loop Error: {e}")
             continue
             
     print("🛑 [AI Process] Stopped.")

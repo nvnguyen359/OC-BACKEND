@@ -1,103 +1,132 @@
-# app/services/google_tts.py
 import os
 import hashlib
 import threading
 import platform
 import time
-from gtts import gTTS
+import queue
+import subprocess
 import ctypes
+from gtts import gTTS
 
-# Thư mục lưu cache âm thanh
+# Cấu hình thư mục
 CACHE_DIR = "app/media/tts_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 class GoogleTTSService:
     def __init__(self):
-        pass
+        # Hàng đợi chứa các câu cần đọc
+        self.queue = queue.Queue()
+        self.is_running = True
+        self.os_type = platform.system()
+        
+        # Khởi tạo luồng xử lý duy nhất (Worker)
+        # daemon=True để luồng tự tắt khi chương trình chính tắt
+        self.worker_thread = threading.Thread(target=self._worker_process, daemon=True, name="TTS_Worker")
+        self.worker_thread.start()
 
-    def _play_mp3(self, file_path):
+        print(f"🔈 [TTS] Service Started on {self.os_type}")
+
+    def speak(self, text, priority=False):
         """
-        Phát file MP3. 
-        LƯU Ý: Hàm này sẽ BLOCK (đợi) cho đến khi âm thanh phát xong 
-        để đảm bảo không xóa file khi đang phát.
+        Thêm yêu cầu đọc vào hàng đợi.
+        Args:
+            text (str): Nội dung cần đọc.
+            priority (bool): (Mở rộng) Sau này có thể dùng để chèn thông báo khẩn cấp.
+        """
+        if not text: return
+        # Đẩy vào queue, worker sẽ tự lấy ra xử lý
+        self.queue.put(text)
+
+    def _worker_process(self):
+        """
+        Luồng chạy ngầm liên tục để xử lý hàng đợi.
+        Đảm bảo chỉ có 1 tiến trình phát âm thanh tại 1 thời điểm.
+        """
+        while self.is_running:
+            try:
+                # Lấy text từ queue, chờ tối đa 1s nếu rỗng
+                text = self.queue.get(timeout=1.0)
+                
+                # Xử lý đọc
+                self._process_speech(text)
+                
+                # Báo hiệu đã xử lý xong item này
+                self.queue.task_done()
+                
+                # Nghỉ nhẹ giữa các câu để âm thanh tách bạch
+                time.sleep(0.5) 
+                
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"❌ [TTS Worker Error] {e}")
+
+    def _process_speech(self, text):
+        try:
+            # 1. Tạo đường dẫn file (Hash để tránh trùng tên file lỗi)
+            text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+            file_path = os.path.join(CACHE_DIR, f"{text_hash}.mp3")
+
+            # 2. Gọi Google API nếu file chưa có
+            if not os.path.exists(file_path):
+                tts = gTTS(text=text, lang='vi')
+                tts.save(file_path)
+
+            # 3. Phát âm thanh theo hệ điều hành
+            if self.os_type == "Linux":
+                self._play_linux(file_path)
+            elif self.os_type == "Windows":
+                self._play_windows(file_path)
+
+            # 4. Xóa file ngay sau khi đọc (Tiết kiệm bộ nhớ cho Pi)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+        except Exception as e:
+            print(f"⚠️ [TTS Fail] '{text}': {e}")
+
+    def _play_linux(self, file_path):
+        """
+        Phát trên Orange Pi/Linux tối ưu với mpg123
         """
         try:
-            if platform.system() == "Linux":
-                # [MODIFIED] Linux: Bỏ dấu '&' để đợi phát xong mới return
-                os.system(f"mpg123 -q {file_path}")
+            # Cấu hình tối ưu cho OP3:
+            # -o pulse: Dùng PulseAudio (Fix lỗi Deep trouble flush)
+            # --buffer 1024: Tăng bộ nhớ đệm để không bị vấp khi CPU cao
+            # -q: Im lặng (không in log ra terminal)
+            cmd = ["mpg123", "-o", "pulse", "--buffer", "1024", "-q", file_path]
             
-            elif platform.system() == "Windows":
-                # Windows: Hàm này đã có lệnh 'wait' nên sẽ tự đợi
-                self._play_windows_hidden(file_path)
+            # Fallback: Nếu không có Pulse, thử chạy ALSA mặc định
+            # Kiểm tra xem pulseaudio có đang chạy không
+            try:
+                subprocess.run(cmd, check=True)
+            except subprocess.CalledProcessError:
+                # Nếu lệnh trên lỗi, thử chạy mode basic
+                os.system(f"mpg123 -q {file_path}")
                 
         except Exception as e:
-            print(f"❌ [TTS] Play Error: {e}")
+            print(f"Linux Audio Err: {e}")
 
-    def _play_windows_hidden(self, file_path):
+    def _play_windows(self, file_path):
         """
-        Sử dụng winmm.dll của Windows để phát nhạc không cần UI.
+        Phát trên Windows dùng winmm.dll (Giữ nguyên logic cũ của bạn vì nó ổn)
         """
         try:
             alias = f"tts_{int(time.time()*1000)}"
-            # Bọc đường dẫn trong ngoặc kép
             cmd_open = f'open "{file_path}" type mpegvideo alias {alias}'
-            # Lệnh 'wait' rất quan trọng: thread sẽ dừng ở đây cho đến khi nói xong
-            cmd_play = f'play {alias} wait'
+            cmd_play = f'play {alias} wait' # Wait để block thread cho đến khi xong
             cmd_close = f'close {alias}'
 
             ctypes.windll.winmm.mciSendStringW(cmd_open, None, 0, 0)
             ctypes.windll.winmm.mciSendStringW(cmd_play, None, 0, 0)
             ctypes.windll.winmm.mciSendStringW(cmd_close, None, 0, 0)
-            
-        except Exception as e:
-            print(f"⚠️ Windows MCI Error: {e}")
+        except:
+            # Fallback đơn giản
             try:
                 import winsound
                 winsound.PlaySound(file_path, winsound.SND_FILENAME)
             except: pass
 
-    def speak(self, text, use_cache=True, delete_after_play=True):
-        """
-        Chuyển văn bản thành giọng nói.
-        Args:
-            delete_after_play (bool): Xóa file sau khi đọc xong (Mặc định True theo yêu cầu).
-        """
-        def _worker():
-            if not text: return
-
-            # [NEW] 1. Delay 2 giây trước khi bắt đầu xử lý/đọc
-            time.sleep(2)
-
-            try:
-                # Tạo tên file
-                text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
-                output_file = os.path.join(CACHE_DIR, f"{text_hash}.mp3")
-
-                # Kiểm tra Cache hoặc tạo mới
-                file_ready = False
-                if use_cache and os.path.exists(output_file):
-                    file_ready = True
-                else:
-                    # Gọi Google TTS
-                    tts = gTTS(text=text, lang='vi')
-                    tts.save(output_file)
-                    file_ready = True
-                
-                # Phát file (Hàm này sẽ đợi đến khi nói xong)
-                if file_ready:
-                    self._play_mp3(output_file)
-
-                # [NEW] 2. Xóa file sau khi đọc xong
-                if delete_after_play and os.path.exists(output_file):
-                    os.remove(output_file)
-                    # print(f"🗑️ [TTS] Deleted: {output_file}") # Uncomment để debug
-                
-            except Exception as e:
-                print(f"❌ [TTS] Generate/Play Error: {e}")
-
-        # Chạy trong luồng riêng
-        threading.Thread(target=_worker, daemon=True).start()
-
-# Tạo instance global
+# Tạo instance global để các file khác import dùng luôn
 tts_service = GoogleTTSService()

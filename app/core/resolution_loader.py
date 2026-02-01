@@ -1,32 +1,25 @@
 # app/core/resolution_loader.py
 from app.db.session import SessionLocal
-from app.db.models import Setting
-
-# Mặc định phòng hờ
-DEFAULT_W = 1280
-DEFAULT_H = 720
+from app.crud.setting_crud import setting as setting_crud
 
 def get_system_resolution():
     """
-    Trả về (width, height) từ bảng settings.
-    Key: 'camera_width', 'camera_height'
+    Lấy độ phân giải từ Database.
+    Nếu DB chưa cài, dùng mặc định tối ưu cho Orange Pi (854x480).
     """
-    w, h = DEFAULT_W, DEFAULT_H
+    db = SessionLocal()
     try:
-        db = SessionLocal()
+        # Lấy setting, nếu không có thì trả về None
+        w_str = setting_crud.get_value(db, "camera_width")
+        h_str = setting_crud.get_value(db, "camera_height")
         
-        # Lấy Width
-        setting_w = db.query(Setting).filter(Setting.key == "camera_width").first()
-        if setting_w and setting_w.value:
-            w = int(setting_w.value)
-            
-        # Lấy Height
-        setting_h = db.query(Setting).filter(Setting.key == "camera_height").first()
-        if setting_h and setting_h.value:
-            h = int(setting_h.value)
-            
-        db.close()
+        # Nếu có trong DB thì dùng, không thì dùng mặc định 854x480
+        if w_str and h_str:
+            return int(w_str), int(h_str)
+        else:
+            return 854, 480
     except Exception as e:
-        print(f"⚠️ Resolution Load Error: {e}. Using default {DEFAULT_W}x{DEFAULT_H}")
-        
-    return w, h
+        print(f"⚠️ Load Resolution Error: {e}, using default.")
+        return 854, 480
+    finally:
+        db.close()

@@ -1,37 +1,17 @@
 [Unit]
-Description=Auto Camera AI System (FastAPI + YOLO + OpenCV)
-# Chờ mạng có kết nối trước khi khởi động
+Description=Auto Camera AI System
 After=network.target
 
 [Service]
-# --- 1. CẤU HÌNH USER (Thay đổi nếu user của bạn khác 'orangepi') ---
-User=orangepi
-Group=orangepi
+User=root
+Group=root
+WorkingDirectory=/root
+# Đảm bảo đường dẫn python đúng trong venv
+ExecStart=/root/venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
-# --- 2. THƯ MỤC LÀM VIỆC (QUAN TRỌNG) ---
-# Trỏ đến thư mục gốc của dự án (nơi chứa thư mục 'app' và 'venv')
-# Ví dụ thực tế: /home/orangepi/camera_ai
-WorkingDirectory=/home/orangepi/camera_ai
-
-# --- 3. LỆNH KHỞI CHẠY ---
-# Sử dụng Python trong môi trường ảo (venv) để chạy uvicorn
-# Cú pháp: [Đường dẫn venv python] -m uvicorn app.main:app [tham số]
-ExecStart=/home/orangepi/camera_ai/venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
-
-# --- 4. CẤU HÌNH KHÁC ---
-# Giúp log python hiển thị ngay lập tức (không bị buffer)
 Environment=PYTHONUNBUFFERED=1
-
-# Tự động khởi động lại nếu phần mềm bị crash
 Restart=always
-# Chờ 5 giây trước khi thử khởi động lại
 RestartSec=5
 
-# Cấu hình Log (xem bằng lệnh: journalctl -u autocamera -f)
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=packing_cam
-
 [Install]
-# Chạy ở chế độ đa người dùng (chế độ server thông thường)
 WantedBy=multi-user.target

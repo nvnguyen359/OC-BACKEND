@@ -78,3 +78,9 @@ Bước 4: Viết app/services/camera_manager.py (Logic quản lý cam, kết n�
 Bước 5: Sửa app/api/routers/camera_router.py để mở API cho Client gọi.
 
 Bước 6: Sửa app/main.py để kích hoạt mọi thứ.
+
+# pip install -r requirements.txt
+# uvicorn app.main:app --reload
+# apt update && apt install -y libzbar0 libgl1-mesa-glx
+# systemctl restart autocamera.service
+ journalctl -u autocamera -f #xem log

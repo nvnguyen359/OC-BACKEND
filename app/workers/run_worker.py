@@ -1,6 +1,5 @@
 # app/workers/run_worker.py
 import time
-# [QUAN TRỌNG] Import đúng 3 worker chính
 from app.workers.camera_worker import camera_system
 from app.workers.upsert_camera_worker import upsert_camera_worker
 from app.workers.disk_manager_worker import disk_manager_worker
@@ -11,21 +10,20 @@ def start_all_workers():
     """
     print("============== STARTING WORKERS ==============")
     
-    # 1. Kiểm tra Camera System (Đã tự chạy khi import singleton)
+    # 1. Kích hoạt Camera System (Lúc này mới thực sự chạy Process)
+    camera_system.start()
+    
     if camera_system.is_system_running:
         print("✅ [RunWorker] Camera System is RUNNING.")
-    else:
-        print("⚠️ [RunWorker] Camera System is OFF.")
 
-    # 2. Bật Upsert Worker (Quét DB thay đổi config)
+    # 2. Bật Upsert Worker
     upsert_camera_worker.start()
     
-    # 3. Bật Disk Manager Worker (Dọn dẹp ổ cứng lúc 3h sáng)
+    # 3. Bật Disk Manager Worker
     disk_manager_worker.start()
 
     print("================ WORKERS STARTED =============")
 
-    # Giữ main thread sống nếu file này được chạy trực tiếp (test)
     if __name__ == "__main__":
         try:
             while True: time.sleep(1)

@@ -7,11 +7,9 @@
 # from app.workers.camera_worker import camera_system, CameraRuntime
 # =============================================================================
 
-# 1. Import các hằng số/hàm tiện ích nếu cần thiết (từ camera_runtime)
-from app.workers.camera_runtime import (
-    CameraRuntime,
-    FPS_RECORD
-)
+# 1. Import class chính
+# [FIX] Đã bỏ FPS_RECORD ở đây vì bên runtime không còn dùng hằng số này nữa
+from app.workers.camera_runtime import CameraRuntime
 
 # 2. Import System quản lý và instance singleton (từ camera_system)
 from app.workers.camera_system import (
@@ -19,5 +17,5 @@ from app.workers.camera_system import (
     camera_system
 )
 
-# Bây giờ, bất kỳ file nào gọi "import camera_worker" sẽ tự động
-# nhận được các class và biến từ 2 file con mới tách ra.
+# Export rõ ràng để các module khác import không bị lỗi
+__all__ = ["CameraRuntime", "CameraSystem", "camera_system"]

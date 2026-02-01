@@ -55,7 +55,7 @@ class ImageProcessor:
         try:
             font = cv2.FONT_HERSHEY_SIMPLEX
             # Vẽ viền đen (thickness + 3) để chữ nổi bật trên nền sáng
-            cv2.putText(frame, text, (x, y), font, self.font_scale, (0, 0, 0), self.thickness + 3, cv2.LINE_AA)
+            cv2.putText(frame, text, (x, y), font, self.font_scale, (0, 0, 0), self.thickness + 1, cv2.LINE_AA)
             # Vẽ chữ chính
             cv2.putText(frame, text, (x, y), font, self.font_scale, color, self.thickness, cv2.LINE_AA)
         except: pass

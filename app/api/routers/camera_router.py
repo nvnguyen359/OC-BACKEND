@@ -169,7 +169,8 @@ async def websocket_ai_overlay(
 
 @router.get("/{cam_id}/stream")
 async def get_camera_stream(cam_id: int):
-    cam = camera_system.get_camera(cam_id)
+    # [FIXED] Dùng .cameras.get(cam_id)
+    cam = camera_system.cameras.get(cam_id)
     if not cam: raise HTTPException(status_code=404, detail="Camera not active in background")
     
     async def iterfile():
@@ -187,7 +188,8 @@ async def get_camera_stream(cam_id: int):
 
 @router.get("/{cam_id}/snapshot")
 def get_camera_snapshot(cam_id: int):
-    cam = camera_system.get_camera(cam_id)
+    # [FIXED] Dùng .cameras.get(cam_id)
+    cam = camera_system.cameras.get(cam_id)
     if cam and cam.is_running:
         img_bytes = cam.get_snapshot() if hasattr(cam, 'get_snapshot') else cam.get_jpeg()
         if img_bytes: return Response(content=img_bytes, media_type="image/jpeg")
@@ -195,7 +197,8 @@ def get_camera_snapshot(cam_id: int):
 
 @router.get("/{cam_id}/ai-overlay")
 def get_ai_overlay_http(cam_id: int):
-    cam = camera_system.get_camera(cam_id)
+    # [FIXED] Dùng .cameras.get(cam_id)
+    cam = camera_system.cameras.get(cam_id)
     return cam.ai_metadata if cam else []
 
 # =========================================================
@@ -258,7 +261,8 @@ def disconnect_camera(
 
 @router.post("/{cam_id}/record")
 def control_recording(cam_id: int, action: str = "start", code: str = None, db: Session = Depends(get_db)):
-    cam_runtime = camera_system.get_camera(cam_id)
+    # [FIXED] Dùng .cameras.get(cam_id)
+    cam_runtime = camera_system.cameras.get(cam_id)
     if not cam_runtime: raise HTTPException(404, "Camera is not running")
     
     if action == "start":
@@ -280,7 +284,9 @@ def get_camera(cam_id: int, db: Session = Depends(get_db)):
     if not cam: raise HTTPException(404, "Camera not found")
     
     cam_data = schemas.CameraOut.model_validate(cam).model_dump()
-    real_cam = camera_system.get_camera(cam_id)
+    
+    # [FIXED] Dùng .cameras.get(cam_id)
+    real_cam = camera_system.cameras.get(cam_id)
     
     if real_cam:
         cam_data['is_connected'] = True

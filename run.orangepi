@@ -1,0 +1,22 @@
+2. Lệnh Cài đặt (Copy & Chạy)
+Vì Orange Pi là kiến trúc ARM và Linux, bạn cần cài một số thư viện hệ thống trước khi cài gói Python để tránh lỗi biên dịch (build error).
+
+Bước 1: Cài thư viện hệ thống (BẮT BUỘC) Chạy lệnh này để cài driver camera, thư viện QR và công cụ biên dịch:
+
+Bash
+sudo apt update
+sudo apt install -y libzbar0 libgl1-mesa-glx python3-dev build-essential
+Bước 2: Cài thư viện Python Kích hoạt môi trường ảo và cài đặt từ file trên:
+
+Bash
+# 1. Kích hoạt venv (nếu chưa)
+source venv/bin/activate
+
+# 2. Cập nhật pip (quan trọng để cài wheel cho ARM)
+pip install --upgrade pip
+
+# 3. Cài các gói trong requirements.txt
+pip install -r requirements.txt
+kich hoat moi truong ao:
+python -m venv venv
+.\venv\Scripts\Activate.ps1

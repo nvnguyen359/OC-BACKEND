@@ -1,52 +1,44 @@
 # app/services/socket_service.py
+import socketio
 import asyncio
-import json
-from typing import List
-from fastapi import WebSocket
 
 class SocketService:
     def __init__(self):
-        self.active_connections: List[WebSocket] = []
+        # 1. Khởi tạo Async Socket.IO Server
+        # cors_allowed_origins='*' để cho phép Angular kết nối từ port khác (vd 4200)
+        self.sio = socketio.AsyncServer(
+            async_mode='asgi',
+            cors_allowed_origins='*',
+            logger=False,
+            engineio_logger=False
+        )
+
+        # 2. Tạo ASGI App (Wrapper)
+        # socketio_path="" vì bên main.py ta đã mount vào đường dẫn "/socket.io" rồi.
+        # Nếu để mặc định nó sẽ thành /socket.io/socket.io -> Client không nối được.
+        self.app = socketio.ASGIApp(self.sio, socketio_path="")
+
         self.loop = None
 
     def set_loop(self, loop):
         """
-        Lưu Event Loop chính của FastAPI. 
-        Cần gọi hàm này ở sự kiện 'startup' trong main.py để có thể gửi tin từ thread khác.
+        Lưu Event Loop chính của FastAPI.
+        Cần gọi hàm này ở sự kiện 'startup' (lifespan) trong main.py.
         """
         self.loop = loop
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        # print(f"🔌 [Socket] Client connected. Total: {len(self.active_connections)}")
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            # print(f"🔌 [Socket] Client disconnected. Total: {len(self.active_connections)}")
-
-    async def _broadcast_async(self, message: dict):
-        """Gửi tin nhắn đến tất cả client đang kết nối (Chạy trong Async Loop)"""
-        if not self.active_connections:
-            return
-            
-        txt = json.dumps(message, default=str)
-        # Tạo bản sao danh sách để tránh lỗi Runtime nếu list thay đổi khi đang gửi
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(txt)
-            except Exception:
-                self.disconnect(connection)
-
     def broadcast_event(self, event_type: str, data: dict):
         """
-        Hàm này Thread-Safe, có thể gọi từ Camera Thread (Synchronous).
-        Nó sẽ đẩy task gửi tin nhắn vào Event Loop chính của Server.
+        Hàm gửi sự kiện xuống tất cả client (Thread-Safe).
+        Có thể gọi từ luồng Camera (Synchronous) mà không bị lỗi Async.
         """
-        if self.loop and self.active_connections:
-            payload = {"event": event_type, "payload": data}
-            asyncio.run_coroutine_threadsafe(self._broadcast_async(payload), self.loop)
+        if self.loop:
+            # Chuyển việc gửi tin nhắn vào luồng chính (Main Loop)
+            # Emit trực tiếp event_type (vd: 'ORDER_CREATED') thay vì bọc trong JSON
+            coro = self.sio.emit(event_type, data)
+            asyncio.run_coroutine_threadsafe(coro, self.loop)
+        else:
+            print(f"⚠️ [Socket] Event Loop not set. Cannot emit: {event_type}")
 
 # Singleton Instance
 socket_service = SocketService()
