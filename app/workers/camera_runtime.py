@@ -4,6 +4,7 @@ import threading
 import time
 import multiprocessing
 import platform
+import re  # [UPDATE] Thêm thư viện regex
 from datetime import datetime, timedelta, date
 from typing import Any
 import pytz
@@ -30,6 +31,44 @@ from app.db import models
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 # RECONNECT_DELAY: Thời gian chờ trước khi thử kết nối lại camera nếu bị mất
 RECONNECT_DELAY = 5.0
+
+# --- [UPDATE] HÀM VALIDATE MÃ VẬN ĐƠN ---
+def validate_shipping_code(code: str) -> bool:
+    """
+    Kiểm tra tính hợp lệ của mã vận đơn để loại bỏ nhiễu (vân gỗ, mã rác).
+    """
+    if not code:
+        return False
+    
+    # Chuẩn hóa: Viết hoa, bỏ khoảng trắng thừa
+    code = str(code).upper().strip()
+
+    # LỚP 1: Kiểm tra độ dài (Mã vận đơn thường > 5 ký tự)
+    # Các mã rác như '7', '$!', 'A' sẽ bị loại ở đây.
+    if len(code) <= 5:
+        return False
+
+    # LỚP 2: Kiểm tra ký tự (Chỉ chấp nhận A-Z và 0-9)
+    # Loại bỏ các mã chứa ký tự đặc biệt do lỗi OCR: $, !, %, @, dấu cách giữa
+    if not re.match(r'^[A-Z0-9]+$', code):
+        return False
+
+    # LỚP 3: Regex định dạng các hãng vận chuyển phổ biến tại VN
+    patterns = [
+        r'^SPX',               # Shopee Express (Bắt đầu bằng SPX...)
+        r'^VN[0-9A-Z]+',       # Shopee/VNPost cũ
+        r'^[0-9]{9,15}$',      # J&T, Best Express (Toàn số, dài từ 9-15 ký tự)
+        r'^[A-Z]{2}[0-9]{9}[A-Z]{2}$', # VNPost/EMS chuẩn UPU (VD: EM123456789VN)
+        r'^[A-Z0-9]{8,20}$',   # GHN, NinjaVan, ViettelPost (Chuỗi dài gồm chữ và số)
+        r'^84[0-9]+',          # J&T hoặc Best đầu 84
+        r'^TE[0-9]+'           # J&T đầu TE
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, code):
+            return True
+            
+    return False
 
 class CameraRuntime:
     def __init__(self, cam_id: int, source: Any, ai_queue: multiprocessing.Queue):
@@ -197,7 +236,6 @@ class CameraRuntime:
             self.current_avatar_path = None 
             
             # [FIXED] Dùng fps_record động từ setting (đã set vào self.recorder.fps)
-            # Không truyền tham số fps vào hàm start nữa để tránh lỗi TypeError
             self.recorder.start(code, self.target_w, self.target_h)
             
             self.current_order_db_id = order_repo.create_order(
@@ -352,7 +390,19 @@ class CameraRuntime:
                 self.pending_stop_data = None
 
         meta = list(self.ai_metadata)
-        final_codes = [m['code'] for m in meta if m['type'] in ['qrcode','code']]
+        
+        # --- [UPDATE] VALIDATE SHIPPING CODE ---
+        # Lấy raw code từ AI, sau đó lọc qua hàm validate
+        raw_codes = [m['code'] for m in meta if m['type'] in ['qrcode','code']]
+        final_codes = []
+        for c in raw_codes:
+            # Clean & Validate
+            c_clean = str(c).upper().strip()
+            if validate_shipping_code(c_clean):
+                final_codes.append(c_clean)
+            # else:
+            #    print(f"⚠️ Ignored Noise: {c}") # Debug only
+
         human = any(m['type'] == 'human' for m in meta)
         if final_codes: human = True
 
@@ -367,7 +417,8 @@ class CameraRuntime:
             if current_code != self.last_spoken_code:
                 n = self.read_end_digits_count
                 text_to_read = current_code[-n:] if len(current_code) > n else current_code
-                tts_service.speak(f"mã đơn {n} số cuối {text_to_read}")
+                if(text_to_read):
+                 tts_service.speak(f"mã đơn {n} số cuối {text_to_read}")
                 self.last_spoken_code = current_code
                 self.last_code_speak_time = time.time()
 
