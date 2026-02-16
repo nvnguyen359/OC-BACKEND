@@ -20,7 +20,6 @@ try:
     from app.workers.camera_worker import camera_system
     
     # [QUAN TRỌNG] Import khóa và class từ camera_stream
-    # Class này đã được FIX (bỏ os.dup2) nên sẽ không gây lỗi PermissionError nữa
     from app.workers.camera_stream import FailsafeSuppressStderr, _global_cam_lock
 except ImportError:
     SessionLocal = None; camera_crud = None; schemas = None; camera_system = None
@@ -73,9 +72,17 @@ def is_system_using_index(idx: int) -> bool:
     if not camera_system: return False
     for cam_runner in camera_system.cameras.values():
         if cam_runner.is_running:
-            src = cam_runner.source
-            if str(src) == str(idx): 
-                return True
+            # [FIX ERROR] CameraRuntime không lưu 'source' trực tiếp.
+            # Nó lưu trong object 'stream'. Cần truy cập qua cam_runner.stream.source
+            try:
+                src = None
+                if hasattr(cam_runner, 'stream') and cam_runner.stream:
+                    src = cam_runner.stream.source
+                
+                if str(src) == str(idx): 
+                    return True
+            except Exception:
+                continue
     return False
 
 # ==============================================================================
@@ -120,35 +127,48 @@ class UpsertCameraWorker:
                         existing_cams[idx] = cam
 
                 for idx in range(self.max_scan_index + 1):
+                    # [UPGRADE] BƯỚC 1: Lấy thông tin từ DB trước
+                    db_cam = existing_cams.get(idx)
+                    
+                    # [QUAN TRỌNG] Nếu Admin đã set OFF -> Bỏ qua ngay lập tức
+                    # Việc này giúp nhả hoàn toàn quyền điều khiển /dev/videoX cho app khác
+                    if db_cam and db_cam.status == 'OFF':
+                        continue
+
+                    # [UPGRADE] BƯỚC 2: Nếu không bị cấm (OFF), mới kiểm tra hệ thống/vật lý
                     is_alive = False
                     
-                    if is_system_using_index(idx):
+                    # Kiểm tra xem hệ thống ĐANG CHẠY index này chưa
+                    is_running_in_system = is_system_using_index(idx)
+
+                    if is_running_in_system:
                         is_alive = True
                     else:
+                        # Chỉ Ping vật lý khi status != OFF (đã check ở trên)
                         is_alive = check_physical_device(idx)
 
                     if is_alive:
-                        if idx in existing_cams:
-                            cam = existing_cams[idx]
-                            if cam.status != 'ACTIVE':
-                                print(f"🔌 [Re-Connect] Camera {idx} is back online.")
-                                self._update_db(db, cam, 'ACTIVE', 1)
-                                self._sync_system(cam.id, idx, 'START')
+                        if db_cam:
+                            # Logic: Start nếu chưa chạy
+                            # [FIX] Thêm điều kiện: Nếu status != ACTIVE hoặc hệ thống chưa chạy
+                            if db_cam.status != 'ACTIVE' or not is_running_in_system:
+                                # Chỉ tự bật lại nếu status không phải là OFF hoặc DISCONNECTED
+                                if db_cam.status not in ['OFF', 'DISCONNECTED']: 
+                                    print(f"🔌 [Re-Connect] Camera {idx} detected. Starting...")
+                                    self._update_db(db, db_cam, 'ACTIVE', 1)
+                                    self._sync_system(db_cam.id, idx, 'START')
                         else:
                             print(f"🎉 [New Device] Found new Camera at Index {idx}. Adding to DB...")
                             new_cam = self._create_camera(db, idx)
                             if new_cam:
                                 self._sync_system(new_cam.id, idx, 'START')
                     else:
-                        if idx in existing_cams:
-                            cam = existing_cams[idx]
-                            if cam.status == 'ACTIVE':
-                                print(f"❌ [Disconnect] Camera {idx} unplugged (Status Only).")
-                                self._update_db(db, cam, 'DISCONNECTED', 0)
-                                # Không gọi lệnh STOP để tránh xung đột
-                                # self._sync_system(cam.id, idx, 'STOP')
+                        if db_cam and db_cam.status == 'ACTIVE':
+                            print(f"❌ [Disconnect] Camera {idx} unplugged.")
+                            self._update_db(db, db_cam, 'DISCONNECTED', 0)
 
-            except Exception: pass
+            except Exception as e: 
+                print(f"⚠️ [Upsert Error] {e}")
             finally:
                 if db: db.close()
             

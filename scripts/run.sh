@@ -1,19 +1,27 @@
 #!/bin/bash
-
-# Lấy đường dẫn thư mục hiện tại
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$DIR"
 
-# Kiểm tra xem venv đã có chưa
+# --- KHẮC PHỤC LỖI ILL (QUAN TRỌNG) ---
+# Đổi từ CORTEXA53 sang ARMV8 để tương thích tốt hơn với chip H6
+export OPENBLAS_CORETYPE=ARMV8
+
+# Các biến môi trường khác giữ nguyên
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+
+# Kiểm tra venv
 if [ ! -d "venv" ]; then
-    echo "❌ Chưa tìm thấy môi trường ảo. Hãy chạy ./setup.sh trước!"
+    echo "❌ Lỗi: Chưa tìm thấy 'venv'!"
     exit 1
 fi
 
-echo "🚀 Đang khởi động Camera AI System..."
+echo "🚀 Kích hoạt môi trường ảo..."
 source venv/bin/activate
 
-# Khởi chạy Server với Uvicorn
-# --host 0.0.0.0 để có thể truy cập từ máy tính khác trong mạng LAN
-# --reload chỉ dùng khi dev, khi chạy thật nên bỏ đi để ổn định
-python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+# --- KIỂM TRA NHANH TRƯỚC KHI CHẠY ---
+# Thử import thư viện xem có sập không (để biết ngay lỗi)
+python -c "import numpy; import torch; print('✅ Thư viện Toán học OK')"
+
+echo "🔥 Đang khởi động Camera AI System..."
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1

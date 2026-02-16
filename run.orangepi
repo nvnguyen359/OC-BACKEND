@@ -20,3 +20,66 @@ pip install -r requirements.txt
 kich hoat moi truong ao:
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+ssh-keygen -R 192.168.1.66
+
+
+sudo apt-get update
+sudo apt-get install -y \
+    python3-dev python3-pip python3-venv \
+    build-essential cmake pkg-config \
+    libatlas-base-dev gfortran \
+    libzbar0 \
+    libgl1-mesa-glx libglib2.0-0
+
+    cd ~/OC-BACKEND  # Hoặc /root/OC-BACKEND tùy thư mục bạn để code
+
+# 1. Xóa venv cũ đi cho sạch
+rm -rf venv
+
+# 2. Tạo venv mới (kế thừa system-site-packages để tận dụng thư viện C có sẵn)
+python3 -m venv venv --system-site-packages
+
+# 3. Kích hoạt môi trường
+source venv/bin/activate
+
+# 1. Cập nhật pip
+pip install --upgrade pip
+
+# 2. Cài PyTorch bản nhẹ cho CPU (Quan trọng: Phải cài trước các cái khác)
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+
+# 3. Cài các thư viện xử lý ảnh & AI cốt lõi
+# ultralytics: Để nhận diện người (Human Detect)
+# pyzbar: Để quét mã QR
+pip install "numpy==1.26.4" "opencv-python-headless==4.8.0.76" "ultralytics==8.0.200" pyzbar
+
+# 4. Cài nốt các thư viện còn lại trong requirements (nếu có)
+# Lưu ý: Nếu trong requirements.txt có 'opencv-python' thì xóa dòng đó đi, vì đã cài bản headless ở trên rồi
+pip install -r requirements.txt
+
+# Tải model YOLOv8 Nano (bản nhẹ nhất)
+wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt -O yolov8n.pt
+
+sudo systemctl restart autocamera.service
+sudo journalctl -u autocamera -f
+
+# 1. Về đúng thư mục chứa code
+cd /root
+
+# 2. Xóa venv cũ (nếu có)
+rm -rf venv
+
+# 3. Tạo venv mới ngay tại /root/venv
+python3 -m venv venv --system-site-packages
+
+# 4. Kích hoạt và cài đặt
+source venv/bin/activate
+
+# 5. Cài các thư viện quan trọng
+pip install --upgrade pip
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+pip install "numpy==1.26.4" "opencv-python-headless==4.8.0.76" "ultralytics==8.0.200" pyzbar
+pip install -r requirements.txt
+sudo systemctl daemon-reload
+sudo apt-get update
+sudo apt-get install -y ffmpeg

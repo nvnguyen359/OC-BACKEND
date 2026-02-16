@@ -1,3 +1,4 @@
+# app/routers/camera_router.py
 import asyncio
 import json
 import time
@@ -98,7 +99,6 @@ async def websocket_ai_overlay(
 
     await websocket.accept()
     target_cam_id = camera_id
-    # print(f"✅ [WS] Connected: {user.username}")
     
     tick_count = 0 
     last_event_timestamps = {}
@@ -157,7 +157,6 @@ async def websocket_ai_overlay(
             except Exception: pass 
 
     except Exception as e:
-        # print(f"❌ [WS] Error: {e}")
         pass
     finally:
         try: await websocket.close() 
@@ -169,7 +168,6 @@ async def websocket_ai_overlay(
 
 @router.get("/{cam_id}/stream")
 async def get_camera_stream(cam_id: int):
-    # [FIXED] Dùng .cameras.get(cam_id)
     cam = camera_system.cameras.get(cam_id)
     if not cam: raise HTTPException(status_code=404, detail="Camera not active in background")
     
@@ -188,7 +186,6 @@ async def get_camera_stream(cam_id: int):
 
 @router.get("/{cam_id}/snapshot")
 def get_camera_snapshot(cam_id: int):
-    # [FIXED] Dùng .cameras.get(cam_id)
     cam = camera_system.cameras.get(cam_id)
     if cam and cam.is_running:
         img_bytes = cam.get_snapshot() if hasattr(cam, 'get_snapshot') else cam.get_jpeg()
@@ -197,7 +194,6 @@ def get_camera_snapshot(cam_id: int):
 
 @router.get("/{cam_id}/ai-overlay")
 def get_ai_overlay_http(cam_id: int):
-    # [FIXED] Dùng .cameras.get(cam_id)
     cam = camera_system.cameras.get(cam_id)
     return cam.ai_metadata if cam else []
 
@@ -240,28 +236,39 @@ def disconnect_camera(
     user = Depends(get_current_user)
 ):
     """
-    [STOP] Tắt Camera: 
-    - [FIX] Luôn cập nhật DB -> DISCONNECTED cho mọi User.
-    - Dừng Worker.
+    [STOP] Tắt Camera:
+    - Nếu là ADMIN: Set trạng thái 'OFF' -> Worker sẽ KHÔNG tự động quét/bật lại.
+    - Nếu là USER thường: Set 'DISCONNECTED'.
     """
     svc = CameraService(db)
     
-    # 1. [FIX] Luôn Update DB -> DISCONNECTED để F5 vẫn giữ trạng thái tắt
+    is_admin = getattr(user, "is_superuser", False) or getattr(user, "role", "").upper() == "ADMIN"
+    
+    new_status = "OFF" if is_admin else "DISCONNECTED"
+    
     cam = svc.disconnect_camera(cam_id)
     
-    # 2. Stop Worker (Kill Thread)
+    if is_admin and cam:
+        cam.status = new_status
+        db.commit()
+        db.refresh(cam)
+    
     camera_system.stop_camera(cam_id)
+    time.sleep(0.5)
     
-    # Log ai đã tắt
-    role = "ADMIN" if getattr(user, "is_superuser", False) else "USER"
-    print(f"🛑 [{role} {user.username}] Đã tắt cam: {cam_id}")
+    role = "ADMIN" if is_admin else "USER"
+    print(f"🛑 [{role} {user.username}] Đã tắt cam: {cam_id} (Status: {new_status})")
     
+    # [FIX] Đánh lừa Pydantic Response
+    # Nếu là OFF thì trả về DISCONNECTED để không bị lỗi 500 Validation Error
+    if cam.status == 'OFF':
+        cam.status = 'DISCONNECTED'
+        
     return response_success(data=cam)
 
 
 @router.post("/{cam_id}/record")
 def control_recording(cam_id: int, action: str = "start", code: str = None, db: Session = Depends(get_db)):
-    # [FIXED] Dùng .cameras.get(cam_id)
     cam_runtime = camera_system.cameras.get(cam_id)
     if not cam_runtime: raise HTTPException(404, "Camera is not running")
     
@@ -283,9 +290,13 @@ def get_camera(cam_id: int, db: Session = Depends(get_db)):
     cam = svc.get_camera(cam_id)
     if not cam: raise HTTPException(404, "Camera not found")
     
+    # [FIX] Tránh lỗi 500 nếu Status='OFF' mà Schema không cho phép
+    if cam.status == 'OFF':
+        cam.status = 'DISCONNECTED'
+
+    # Validate bằng Pydantic sau khi đã patch status
     cam_data = schemas.CameraOut.model_validate(cam).model_dump()
     
-    # [FIXED] Dùng .cameras.get(cam_id)
     real_cam = camera_system.cameras.get(cam_id)
     
     if real_cam:
@@ -306,12 +317,28 @@ def create_camera(cam: schemas.CameraCreate, db: Session = Depends(get_db)):
     return response_success(CameraService(db).create_camera(cam))
 
 @router.get("", response_model=CameraListResponse)
-def get_all_cameras(db: Session = Depends(get_db), skip: int = 0, limit: int = 100):
-    return response_success(CameraService(db).get_all_cameras(skip, limit))
+def get_all_cameras(db: Session = Depends(get_db), skip: int = 0, limit: int = 100,all:bool = True):
+    cams = CameraService(db).get_all_cameras(skip, limit, all)
+    
+    # [FIX CRITICAL] Xử lý lỗi 500 Validation Error
+    # Schema CameraOut hiện tại có thể chỉ chấp nhận 'ACTIVE' | 'DISCONNECTED' | 'ERROR'
+    # Nếu status là 'OFF', Pydantic sẽ throw error.
+    # Ta cần map 'OFF' -> 'DISCONNECTED' cho tầng hiển thị.
+    for cam in cams:
+        if cam.status == 'OFF':
+            cam.status = 'DISCONNECTED'
+            
+    return response_success(cams)
 
 @router.patch("/{cam_id}")
 def update_camera(cam_id: int, cam_in: schemas.CameraUpdate, db: Session = Depends(get_db)):
-    return response_success(CameraService(db).update_camera(cam_id, cam_in))
+    updated_cam = CameraService(db).update_camera(cam_id, cam_in)
+    
+    # [FIX] Patch cả ở đây để tránh lỗi khi update xong trả về
+    if updated_cam.status == 'OFF':
+        updated_cam.status = 'DISCONNECTED'
+        
+    return response_success(updated_cam)
 
 @router.delete("/{cam_id}")
 def delete_camera(cam_id: int, db: Session = Depends(get_db)):

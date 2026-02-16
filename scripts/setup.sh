@@ -1,42 +1,102 @@
 #!/bin/bash
-
-# Dừng script nếu gặp lỗi
 set -e
 
-echo "🚀 [1/5] Bắt đầu cập nhật hệ thống Orange Pi..."
-sudo apt-get update && sudo apt-get upgrade -y
+echo "=================================================="
+echo "🚀 CÀI ĐẶT HỆ THỐNG AUTO CAMERA (NORMAL MODE)"
+echo "=================================================="
 
-echo "📦 [2/5] Cài đặt các thư viện hệ thống cần thiết (System dependencies)..."
-# libgl1: Cần cho OpenCV
-# libzbar0: Cần cho Pyzbar đọc mã vạch
-# python3-venv: Để tạo môi trường ảo
-# mpg123: Để phát âm thanh mp3 (TTS)
-# v4l-utils: Công cụ kiểm tra camera
-sudo apt-get install -y python3-pip python3-venv libgl1 libgl1-mesa-glx libglib2.0-0 libzbar0 mpg123 v4l-utils
+# 1. CÀI ĐẶT PHẦN MỀM HỆ THỐNG
+echo "🔄 [1/5] Cài đặt System Dependencies..."
+sudo apt-get update
+sudo apt-get install -y ffmpeg libzbar0 libgl1-mesa-glx libglib2.0-0 python3-dev build-essential pkg-config libatlas-base-dev gfortran
 
-echo "🐍 [3/5] Thiết lập môi trường ảo Python (Virtual Environment)..."
-# Xóa môi trường cũ nếu có để cài mới cho sạch
-if [ -d "venv" ]; then
-    echo "   - Đã tìm thấy venv cũ, đang xóa..."
-    rm -rf venv
-fi
+# 2. TẠO CẤU TRÚC THƯ MỤC (OC-media thật)
+echo "📂 [2/5] Tạo thư mục lưu trữ OC-media..."
+# Tạo thư mục ngay tại thư mục gốc (ngang hàng với app)
+mkdir -p OC-media/avatars
+mkdir -p OC-media/videos
+mkdir -p OC-media/temp_rec
 
+# Cấp quyền ghi thoải mái (777) để Code và Web đều đọc/ghi được
+chmod -R 777 OC-media
+echo "✅ Đã tạo folder: $(pwd)/OC-media"
+
+# 3. THIẾT LẬP MÔI TRƯỜNG VENV
+echo "🐍 [3/5] Cài đặt môi trường ảo Python..."
+rm -rf venv
 python3 -m venv venv
-echo "   - Đã tạo venv mới."
-
-echo "📥 [4/5] Kích hoạt venv và cài đặt thư viện Python..."
 source venv/bin/activate
-
-# Cập nhật pip
 pip install --upgrade pip
 
-# Cài đặt từ requirements.txt
-# --no-cache-dir giúp tiết kiệm dung lượng thẻ nhớ trên Orange Pi
-pip install --no-cache-dir -r requirements.txt
+# 4. CÀI ĐẶT THƯ VIỆN (Thứ tự quan trọng để không bị lỗi sập nguồn)
+echo "📦 [4/5] Cài đặt thư viện..."
 
-echo "⚙️ [5/5] Cấu hình quyền truy cập Camera..."
-# Thêm user hiện tại vào nhóm video để đọc được Camera USB/CSI
-sudo usermod -aG video $USER
+# --- FIX LỖI CHIP ORANGE PI (QUAN TRỌNG) ---
+echo "🔧 Cài Numpy 1.23.5 (Bản ổn định cho Orange Pi 3)..."
+pip install "numpy==1.23.5"
 
+echo "🔥 Cài PyTorch CPU..."
+pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+
+echo "👁️ Cài OpenCV & YOLO..."
+# Dùng bản headless để nhẹ hệ thống
+pip install "opencv-python-headless==4.8.0.76" "ultralytics==8.0.200"
+
+echo "📚 Cài các thư viện còn lại..."
+pip install -r requirements.txt
+
+# 5. TẠO FILE CHẠY & SERVICE
+echo "⚙️ [5/5] Cấu hình khởi động..."
+
+# Tạo file run.sh
+cat > run.sh <<EOL
+#!/bin/bash
+DIR="\$( cd "\$( dirname "\${BASH_SOURCE[0]}" )" && pwd )"
+cd "\$DIR"
+
+# Cấu hình môi trường (Fix lỗi CPU & Cache)
+export OPENBLAS_CORETYPE=ARMV8
+export PYTHONUNBUFFERED=1
+export PYTHONDONTWRITEBYTECODE=1
+
+if [ ! -d "venv" ]; then
+    echo "❌ Lỗi: Chưa có venv!"
+    exit 1
+fi
+
+source venv/bin/activate
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+EOL
+chmod +x run.sh
+
+# Tạo Service
+SERVICE_FILE="/etc/systemd/system/autocamera.service"
+CURRENT_DIR=$(pwd)
+
+sudo bash -c "cat > $SERVICE_FILE" <<EOL
+[Unit]
+Description=Auto Camera AI System
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=$CURRENT_DIR
+ExecStart=$CURRENT_DIR/run.sh
+Environment=OPENBLAS_CORETYPE=ARMV8
+Environment=PYTHONDONTWRITEBYTECODE=1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+sudo systemctl daemon-reload
+sudo systemctl enable autocamera.service
+
+echo "=================================================="
 echo "✅ CÀI ĐẶT HOÀN TẤT!"
-echo "👉 Hãy chạy lệnh: './run.sh' để khởi động hệ thống."
+echo "👉 Thư mục data: $(pwd)/OC-media"
+echo "👉 Hãy chạy lệnh: sudo systemctl restart autocamera.service"
+echo "=================================================="

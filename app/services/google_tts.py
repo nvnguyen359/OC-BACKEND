@@ -1,3 +1,4 @@
+# app/services/google_tts.py
 import os
 import hashlib
 import threading
@@ -7,6 +8,10 @@ import queue
 import subprocess
 import ctypes
 from gtts import gTTS
+
+# --- [MỚI] Import để đọc cấu hình ---
+from app.db.session import SessionLocal
+from app.crud.setting_crud import setting
 
 # Cấu hình thư mục
 CACHE_DIR = "app/media/tts_cache"
@@ -21,7 +26,6 @@ class GoogleTTSService:
         self.os_type = platform.system()
         
         # Khởi tạo luồng xử lý duy nhất (Worker)
-        # daemon=True để luồng tự tắt khi chương trình chính tắt
         self.worker_thread = threading.Thread(target=self._worker_process, daemon=True, name="TTS_Worker")
         self.worker_thread.start()
 
@@ -30,18 +34,28 @@ class GoogleTTSService:
     def speak(self, text, priority=False):
         """
         Thêm yêu cầu đọc vào hàng đợi.
-        Args:
-            text (str): Nội dung cần đọc.
-            priority (bool): (Mở rộng) Sau này có thể dùng để chèn thông báo khẩn cấp.
+        Đã thêm logic kiểm tra cấu hình 'enable_audio' từ DB.
         """
         if not text: return
-        # Đẩy vào queue, worker sẽ tự lấy ra xử lý
+
+        # --- [MỚI] KIỂM TRA SETTING TRƯỚC KHI NÓI ---
+        try:
+            with SessionLocal() as db:
+                # Lấy giá trị enable_audio (Mặc định là false)
+                is_enabled = setting.get_value(db, "enable_audio")
+                
+                # Nếu không phải "true" thì BỎ QUA LUÔN
+                if str(is_enabled).lower() != "true":
+                    return 
+        except Exception:
+            return # Nếu lỗi DB thì mặc định không nói để an toàn
+
+        # Đẩy vào queue nếu được phép bật
         self.queue.put(text)
 
     def _worker_process(self):
         """
         Luồng chạy ngầm liên tục để xử lý hàng đợi.
-        Đảm bảo chỉ có 1 tiến trình phát âm thanh tại 1 thời điểm.
         """
         while self.is_running:
             try:
@@ -91,42 +105,33 @@ class GoogleTTSService:
         Phát trên Orange Pi/Linux tối ưu với mpg123
         """
         try:
-            # Cấu hình tối ưu cho OP3:
-            # -o pulse: Dùng PulseAudio (Fix lỗi Deep trouble flush)
-            # --buffer 1024: Tăng bộ nhớ đệm để không bị vấp khi CPU cao
-            # -q: Im lặng (không in log ra terminal)
+            # Cấu hình tối ưu cho OP3: -o pulse (Fix lỗi Deep trouble flush)
             cmd = ["mpg123", "-o", "pulse", "--buffer", "1024", "-q", file_path]
             
-            # Fallback: Nếu không có Pulse, thử chạy ALSA mặc định
             # Kiểm tra xem pulseaudio có đang chạy không
             try:
                 subprocess.run(cmd, check=True)
             except subprocess.CalledProcessError:
-                # Nếu lệnh trên lỗi, thử chạy mode basic
+                # Fallback: chạy mode basic (alsa)
                 os.system(f"mpg123 -q {file_path}")
                 
         except Exception as e:
             print(f"Linux Audio Err: {e}")
 
     def _play_windows(self, file_path):
-        """
-        Phát trên Windows dùng winmm.dll (Giữ nguyên logic cũ của bạn vì nó ổn)
-        """
         try:
             alias = f"tts_{int(time.time()*1000)}"
             cmd_open = f'open "{file_path}" type mpegvideo alias {alias}'
-            cmd_play = f'play {alias} wait' # Wait để block thread cho đến khi xong
+            cmd_play = f'play {alias} wait'
             cmd_close = f'close {alias}'
-
             ctypes.windll.winmm.mciSendStringW(cmd_open, None, 0, 0)
             ctypes.windll.winmm.mciSendStringW(cmd_play, None, 0, 0)
             ctypes.windll.winmm.mciSendStringW(cmd_close, None, 0, 0)
         except:
-            # Fallback đơn giản
             try:
                 import winsound
                 winsound.PlaySound(file_path, winsound.SND_FILENAME)
             except: pass
 
-# Tạo instance global để các file khác import dùng luôn
+# Tạo instance global
 tts_service = GoogleTTSService()

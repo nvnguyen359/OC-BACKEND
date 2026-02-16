@@ -5,11 +5,26 @@ After=network.target
 [Service]
 User=root
 Group=root
-WorkingDirectory=/root
-# Đảm bảo đường dẫn python đúng trong venv
-ExecStart=/root/venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
 
+# Thư mục làm việc (Nơi chứa code app, venv...)
+WorkingDirectory=/root
+
+# --- CÁC BIẾN MÔI TRƯỜNG QUAN TRỌNG ---
+# 1. Fix lỗi sập nguồn CPU trên Orange Pi (Bắt buộc)
+Environment=OPENBLAS_CORETYPE=CORTEXA53
+
+# 2. Hiển thị Log ngay lập tức (Debug)
 Environment=PYTHONUNBUFFERED=1
+
+# 3. CHỐNG HỎNG FILE KHI RÚT ĐIỆN (Quan trọng nhất để bán hàng)
+# Lệnh này cấm Python tạo file cache (.pyc), nên rút điện đột ngột sẽ không bị lỗi EOFError
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# --- LỆNH CHẠY ---
+# Nên chạy qua file run.sh để đảm bảo nạp đủ thư viện
+ExecStart=/root/run.sh
+
+# Cơ chế tự khởi động lại khi gặp lỗi
 Restart=always
 RestartSec=5
 

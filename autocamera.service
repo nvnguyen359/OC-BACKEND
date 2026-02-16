@@ -1,0 +1,29 @@
+[Unit]
+Description=Auto Camera AI System
+After=network.target
+
+[Service]
+# [QUAN TRỌNG] Đổi người chạy sang user hiện tại để không bị lỗi quyền
+User=nvnguyen
+Group=nvnguyen
+
+# Thư mục làm việc (Đã đổi sang home của user)
+WorkingDirectory=/home/nvnguyen
+
+# --- CÁC BIẾN MÔI TRƯỜNG ---
+# Fix lỗi sập nguồn CPU trên chip ARM
+Environment=OPENBLAS_CORETYPE=CORTEXA53
+# Hiển thị Log ngay lập tức
+Environment=PYTHONUNBUFFERED=1
+# Chống hỏng file cache khi rút điện
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# --- LỆNH CHẠY (Đã đổi đường dẫn) ---
+ExecStart=/home/nvnguyen/run.sh
+
+# Cơ chế tự khởi động lại
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

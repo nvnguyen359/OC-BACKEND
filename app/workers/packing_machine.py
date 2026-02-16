@@ -11,10 +11,8 @@ class PackingStateMachine:
         self.current_code = None
         
         # --- CẤU HÌNH TỐI ƯU ---
-        # [FIX] Giảm Vote xuống 0.5s để bắt đơn cực nhanh
         self.VOTE_DURATION = 0.5 
-        # [FIX] Cooldown ngắn lại để scan đơn tiếp theo nhanh hơn
-        self.COOLDOWN_DURATION = 1.0
+        self.COOLDOWN_DURATION = 2.0 # Tăng nhẹ cooldown để tránh nhấp nháy
         self.SNAPSHOT_DELAY = 5.0
         
         # Biến cấu hình động
@@ -30,6 +28,10 @@ class PackingStateMachine:
         self.scan_new_code_counter = 0
         self.last_closed_code = None
         self.last_closed_time = 0
+        
+        # [FIX QUAN TRỌNG] Danh sách các mã cần BỎ QUA tạm thời
+        # { "MA_DON_CU": timestamp_het_han }
+        self.ignore_codes = {} 
 
     def update_config(self, timeout_sec: int, end_time_str: str):
         try:
@@ -53,9 +55,18 @@ class PackingStateMachine:
         reason = ""
         target_code = self.current_code
 
+        # --- [1] DỌN DẸP DANH SÁCH CHẶN (IGNORE LIST) ---
+        # Xóa các mã đã hết hạn chặn
+        if self.ignore_codes:
+            self.ignore_codes = {c: t for c, t in self.ignore_codes.items() if t > now}
+
+        # --- [2] LỌC MÃ ĐẦU VÀO ---
+        # Chỉ giữ lại các mã KHÔNG nằm trong danh sách chặn
+        valid_codes = [c for c in detected_codes if c not in self.ignore_codes]
+
         is_ended = self._is_shift_ended()
 
-        # 1. Check Hết ca
+        # 3. Check Hết ca
         if self.state in [MachineState.IDLE, MachineState.BUFFERING]:
             if is_ended:
                 self.state = MachineState.IDLE
@@ -67,18 +78,17 @@ class PackingStateMachine:
             self._reset_state(save_history=True)
             return self.state, action, target_code, reason
 
-        # 2. Logic Máy Trạng Thái
+        # 4. Logic Máy Trạng Thái
         if self.state == MachineState.IDLE:
-            if detected_codes:
+            if valid_codes:
                 self.state = MachineState.BUFFERING
                 self.buffer_start_time = now
                 self.buffer_votes = {}
         
         elif self.state == MachineState.BUFFERING:
-            for code in detected_codes:
+            for code in valid_codes:
                 self.buffer_votes[code] = self.buffer_votes.get(code, 0) + 1
             
-            # Kiểm tra thời gian Vote (Đã giảm xuống 0.5s)
             if now - self.buffer_start_time >= self.VOTE_DURATION:
                 if not self.buffer_votes:
                     self.state = MachineState.IDLE
@@ -94,6 +104,14 @@ class PackingStateMachine:
                         target_code = best_code
 
         elif self.state == MachineState.PACKING:
+            # [FIX ZOMBIE] Kiểm tra nếu đơn treo quá 12 tiếng -> Kill luôn
+            if now - self.packing_start_time > 12 * 3600: # 12 giờ
+                print(f"💀 Đơn {self.current_code} treo quá 12h. Force Close.")
+                action = Action.STOP_ORDER
+                reason = "TIMEOUT"
+                self._reset_state(save_history=True)
+                return self.state, action, target_code, reason
+
             # Keep-Alive
             if has_human:
                 self.last_human_seen_time = now
@@ -110,18 +128,25 @@ class PackingStateMachine:
 
             # Scan New Code (Chuyển đơn nhanh)
             found_new_persistent = False
-            for code in detected_codes:
+            for code in valid_codes: # Dùng valid_codes đã lọc
                 if code != self.current_code:
                     self.scan_new_code_counter += 1
                     found_new_persistent = True
-                    # Giảm ngưỡng counter xuống 10 frame (0.5s) để chuyển đơn nhanh hơn
+                    
                     if self.scan_new_code_counter > 10:
                         old_code = self.current_code
                         new_code = code
+                        
+                        # [QUAN TRỌNG] Thêm mã CŨ vào danh sách CHẶN trong 15 giây
+                        # Để camera không quét lại trúng nó nữa
+                        self.ignore_codes[old_code] = now + 15.0
+                        print(f"🚫 Đã chặn mã cũ {old_code} trong 15s để tránh lặp.")
+
                         self.last_closed_code = old_code
                         self.last_closed_time = now
                         self._start_internal(new_code, now)
                         return self.state, Action.SWITCH_ORDER, new_code, "SCAN_NEW"
+            
             if not found_new_persistent:
                 self.scan_new_code_counter = 0
 
@@ -151,6 +176,12 @@ class PackingStateMachine:
         if save_history:
             self.last_closed_code = self.current_code
             self.last_closed_time = time.time()
+            
+            # [FIX] Khi dừng thủ công hoặc timeout, cũng chặn mã đó 5 giây
+            # để tránh trường hợp vừa đóng xong camera lại bắt dính ngay
+            if self.current_code:
+                self.ignore_codes[self.current_code] = time.time() + 5.0
+
         self.state = MachineState.IDLE
         self.current_code = None
         self.buffer_votes = {}

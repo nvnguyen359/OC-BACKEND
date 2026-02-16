@@ -19,7 +19,8 @@ class SettingCRUD:
             "read_end_order": "5",
             "perf_record_fps": "10.0",
             "perf_view_fps": "15.0",
-            "perf_ai_interval": "12"
+            "perf_ai_interval": "12",
+            "enable_audio": "false"
         }
         
         # Gán giá trị mặc định

@@ -6,52 +6,43 @@ import subprocess
 import platform
 
 # -----------------------------------------------------------------------------
-# 1. CẤU HÌNH ĐƯỜNG DẪN ĐỘNG (AUTO-PATH)
+# 1. CẤU HÌNH ĐƯỜNG DẪN
 # -----------------------------------------------------------------------------
-# Lấy thư mục chứa file launcher.py này (tức là thư mục 'app/')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Định nghĩa đường dẫn tuyệt đối đến các file anh em
 MAIN_SCRIPT = os.path.join(BASE_DIR, "main.py")
 SETUP_SCRIPT = os.path.join(BASE_DIR, "setup_main.py")
 
-# Thử import network service
-# Vì launcher nằm trong 'app/', ta cần thêm thư mục cha (Root) vào sys.path để import được 'app.*'
+# Thêm Root Dir vào sys.path để import module
 ROOT_DIR = os.path.dirname(BASE_DIR)
 if ROOT_DIR not in sys.path:
     sys.path.append(ROOT_DIR)
 
+# Import Network Service
 try:
     from app.services.network_service import network_service
 except ImportError:
-    # Fallback chỉ để không crash ngay lập tức nếu môi trường chưa chuẩn
-    print("⚠️ [Launcher] Warning: Cannot import 'network_service'. Check PYTHONPATH.")
+    print("⚠️ [Launcher] Critical: Cannot import 'network_service'.")
     network_service = None
 
 # -----------------------------------------------------------------------------
-# 2. HÀM CHẠY SCRIPT
+# 2. HÀM HỖ TRỢ
 # -----------------------------------------------------------------------------
 def run_script(script_path):
-    """
-    Hàm wrapper để gọi python script con với môi trường chuẩn.
-    """
+    """Chạy script con (main.py hoặc setup_main.py)"""
     print(f"🚀 [LAUNCHER] Executing: {script_path}")
-    
-    # Lấy đường dẫn python hiện tại (đang chạy trong venv)
     python_exe = sys.executable
     
-    # Chuẩn bị biến môi trường: Thêm ROOT_DIR vào PYTHONPATH cho tiến trình con
+    # Kế thừa biến môi trường và PYTHONPATH
     env = os.environ.copy()
     env["PYTHONPATH"] = ROOT_DIR + os.pathsep + env.get("PYTHONPATH", "")
 
     try:
-        # Gọi subprocess
         subprocess.run([python_exe, script_path], env=env, check=True)
     except KeyboardInterrupt:
         print(f"\n🛑 [LAUNCHER] User stopped {script_path}.")
     except Exception as e:
         print(f"❌ [LAUNCHER] Crash Error: {e}")
-        time.sleep(5)
+        time.sleep(5) # Đợi 5s trước khi thoát để debug nếu cần
 
 # -----------------------------------------------------------------------------
 # 3. LOGIC CHÍNH
@@ -60,46 +51,64 @@ def main():
     print("==========================================")
     print("    ORDER CAMERA AI - SYSTEM LAUNCHER     ")
     print("==========================================")
-    print(f"📂 Working Directory: {os.getcwd()}")
-    print(f"📂 Launcher Location: {BASE_DIR}")
     
-    # 1. Phát hiện hệ điều hành
-    is_windows = platform.system() == "Windows"
-
-    # [WINDOWS] Chạy thẳng vào App chính
-    if is_windows:
+    # 1. Windows Mode (Dev)
+    if platform.system() == "Windows":
         print("💻 Detected Windows. Skipping network check.")
         run_script(MAIN_SCRIPT)
         return
 
-    # [LINUX/ORANGE PI] Logic kiểm tra mạng
+    # 2. Linux/Orange Pi Mode
     if not network_service:
         print("❌ Error: Network Service not loaded. Exiting.")
         return
 
     print("🔍 Checking Internet Connection...")
     has_internet = False
+    
+    # Thử check internet 3 lần (timeout ngắn)
     for i in range(3):
         if network_service.check_internet():
             has_internet = True
             break
-        print(f"   Attempt {i+1}/3 failed. Retrying in 2s...")
-        time.sleep(2)
+        print(f"   Attempt {i+1}/3 failed. Retrying...")
+        time.sleep(1.5)
 
     if has_internet:
         # --- TRƯỜNG HỢP A: CÓ MẠNG ---
-        print("✅ Internet ONLINE. Launching Main Application...")
+        print("✅ Internet ONLINE.")
+        
+        # Tắt Hotspot nếu nó đang chạy ngầm (để tránh xung đột)
+        try:
+            network_service.disable_hotspot()
+        except: pass
+        
+        print("🚀 Launching Main Application...")
         run_script(MAIN_SCRIPT)
+        
     else:
-        # --- TRƯỜNG HỢP B: MẤT MẠNG ---
+        # --- TRƯỜNG HỢP B: MẤT MẠNG / KHÔNG KẾT NỐI ĐƯỢC ---
         print("❌ Internet OFFLINE. Entering SETUP MODE...")
         
-        # 1. Bật Hotspot
-        network_service.enable_hotspot()
+        # [QUAN TRỌNG] Ngắt kết nối Wifi cũ đang bị treo
+        # Nếu không ngắt, wpa_supplicant sẽ chiếm quyền điều khiển wifi, làm hostapd thất bại.
+        print("🧹 Cleaning up old connections...")
+        try:
+            network_service.disconnect_all() 
+        except Exception as e:
+            print(f"⚠️ Warning during cleanup: {e}")
         
-        # 2. Chạy Mini-API Setup
-        print("🛠 Starting Setup API...")
-        run_script(SETUP_SCRIPT)
+        time.sleep(2) # Đợi 2s để phần cứng ổn định
+
+        # Bật Hotspot
+        print("📡 Enabling Hotspot...")
+        if network_service.enable_hotspot():
+            print("✅ Hotspot Started. Running Setup API...")
+            run_script(SETUP_SCRIPT)
+        else:
+            print("❌ Failed to start Hotspot. System check required.")
+            # Vẫn thử chạy setup script phòng trường hợp hotspot đã bật từ trước
+            run_script(SETUP_SCRIPT)
 
 if __name__ == "__main__":
     main()

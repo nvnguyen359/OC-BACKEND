@@ -38,24 +38,38 @@ class CameraStream:
                     if isinstance(self.source, int) and platform.system() == "Windows":
                         self.cap = cv2.VideoCapture(self.source, cv2.CAP_DSHOW)
                     else:
+                        # Linux/WSL/Orange Pi
                         self.cap = cv2.VideoCapture(self.source)
 
             if not self.cap or not self.cap.isOpened():
                 return False
 
-            # [FIX QUAN TRỌNG] Tôn trọng cấu hình độ phân giải (Hỗ trợ 2K/4K)
+            # --- [FIX QUAN TRỌNG CHO WSL/LINUX] ---
+            # Ép dùng MJPEG để giảm tải băng thông USB (Trị dứt điểm lỗi timeout)
+            try:
+                self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            except:
+                pass # Bỏ qua nếu camera không hỗ trợ (nhưng đa số đều cần)
+
+            # Cấu hình độ phân giải (Hỗ trợ 2K/4K)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, target_w)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, target_h)
+            
+            # Giảm độ trễ tối đa
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             
-            # Đọc thử 1 frame
+            # Đọc thử 1 frame để mồi
             ret, _ = self.cap.read()
             if not ret:
-                self.release()
-                return False
+                # Thử lại lần 2 (Đôi khi frame đầu bị đen)
+                ret, _ = self.cap.read()
+                if not ret:
+                    self.release()
+                    return False
                 
             return True
-        except:
+        except Exception as e:
+            print(f"Lỗi connect camera: {e}")
             self.release()
             return False
 

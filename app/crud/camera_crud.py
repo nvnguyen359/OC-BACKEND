@@ -32,8 +32,8 @@ class CRUDCamera(CRUDBase[models.Camera, schemas.CameraCreate, schemas.CameraUpd
             camera_create_model = schemas.CameraCreate(**obj_in)
             return self.create(db, obj_in=camera_create_model)
 
-    def get_all(self, db: Session, skip: int = 0, limit: int = 100) -> List[models.Camera]:
-        return self.get_multi(db, skip=skip, limit=limit)
+    def get_all(self, db: Session, skip: int = 0, limit: int = 100,all: bool = True) -> List[models.Camera]:
+        return self.get_multi(db, skip=skip, limit=limit,all=all)
         
     def connect(self, db: Session, camera_id: int):
         cam = self.get(db, camera_id)

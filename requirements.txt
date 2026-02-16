@@ -12,7 +12,7 @@ python-jose[cryptography]
 passlib[argon2]
 opencv-python-headless
 pyzbar
-numpy
+numpy==1.26.4
 ultralytics
 pytz
 psutil
@@ -21,3 +21,6 @@ orjson
 loguru
 pytest
 httpx
+python-socketio
+aiohttp
+opencv-python==4.8.0.76

@@ -14,11 +14,11 @@ class CameraService:
     def get_camera(self, cam_id: int):
         return camera_crud.get(self.db, cam_id)
 
-    def get_all_cameras(self, skip: int = 0, limit: int = 100):
+    def get_all_cameras(self, skip: int = 0, limit: int = 100, all: bool= True):
         """
         Lấy danh sách tất cả camera, gọi đến tầng CRUD.
         """
-        return camera_crud.get_all(self.db, skip=skip, limit=limit)
+        return camera_crud.get_all(self.db, skip=skip, limit=limit,all = all)
 
     def update_camera(self, cam_id: int, cam_in: schemas.CameraUpdate):
         db_cam = camera_crud.get(self.db, cam_id)
