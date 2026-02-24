@@ -19,8 +19,15 @@ from app.services.socket_service import socket_service
 class CameraSystem:
     def __init__(self):
         self.cameras: Dict[int, CameraRuntime] = {}
-        self.ai_input = multiprocessing.Queue(maxsize=10)
-        self.ai_output = multiprocessing.Queue()
+        
+        # [SỬA LỖI TREO CAM Ở ĐÂY] 
+        # Ép buộc Linux sử dụng context 'spawn' thay vì 'fork' mặc định
+        self.ctx = multiprocessing.get_context('spawn')
+        
+        # Sử dụng self.ctx thay vì multiprocessing mặc định để tạo Queue
+        self.ai_input = self.ctx.Queue(maxsize=10)
+        self.ai_output = self.ctx.Queue()
+        
         self.os_type = platform.system()
         
         self.system_stats = {
@@ -42,9 +49,10 @@ class CameraSystem:
     def start(self):
         if self.is_system_running: return
         self.is_system_running = True
-        print(f"🚀 [System] Camera Core started on {self.os_type}")
+        print(f"🚀 [System] Camera Core started on {self.os_type} (Spawn Mode)")
 
-        self.ai_process = multiprocessing.Process(
+        # Khởi tạo AI Process bằng self.ctx (Spawn)
+        self.ai_process = self.ctx.Process(
             target=run_ai_process, 
             args=(self.ai_input, self.ai_output, "yolov8n.pt"), 
             daemon=True

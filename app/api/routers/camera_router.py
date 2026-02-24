@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+import uuid
 import cv2
 import numpy as np
 from datetime import datetime
@@ -209,22 +210,36 @@ def connect_camera(
 ):
     """
     [START] Bật Camera: Cập nhật DB ACTIVE & Chạy Worker
+    Hỗ trợ cả RTSP (Camera IP) và Device Path (Camera USB/CSI)
     """
     svc = CameraService(db)
     
-    # 1. Update DB -> ACTIVE (Cho cả User và Admin)
-    cam = svc.connect_camera(cam_id)
+    # 1. Lấy thông tin từ DB
+    cam = svc.get_camera(cam_id)
     if not cam: raise HTTPException(404, "Camera not found")
 
-    source = cam.device_path or cam.rtsp_url or cam.device_id
-    if str(source).isdigit(): source = int(source)
-    
+    # 2. Xác định Nguồn Video (Source) ưu tiên RTSP cho Cam IP, sau đó mới đến Local Path
+    source = None
+    if cam.rtsp_url and cam.rtsp_url.strip() != "":
+        source = cam.rtsp_url.strip()
+    elif cam.device_path is not None and str(cam.device_path).strip() != "":
+        source = cam.device_path.strip()
+        if source.isdigit():
+            source = int(source)
+    else:
+        # Fallback nếu không có cả hai (dùng device_id tạm)
+        source = cam.device_id if not str(cam.device_id).isdigit() else int(cam.device_id)
+
     try: 
-        # 2. Start Worker
+        # 3. Start Worker trước khi update DB để đảm bảo luồng thực sự chạy được
         camera_system.add_camera(cam_id, source)
+        
+        # 4. Nếu worker nhận thành công, update DB -> ACTIVE
+        cam = svc.connect_camera(cam_id)
+        
     except Exception as e:
-        svc.disconnect_camera(cam_id) # Rollback nếu lỗi
-        raise HTTPException(500, f"Worker Error: {e}")
+        svc.disconnect_camera(cam_id) # Rollback DB nếu lỗi
+        raise HTTPException(500, f"Failed to start camera stream: {e}")
         
     return response_success(data=cam)
 
@@ -314,16 +329,55 @@ def get_camera(cam_id: int, db: Session = Depends(get_db)):
 
 @router.post("")
 def create_camera(cam: schemas.CameraCreate, db: Session = Depends(get_db)):
-    return response_success(CameraService(db).create_camera(cam))
+    """
+    Tạo mới Camera từ Client (Hỗ trợ USB/CSI và IP RTSP)
+    Tạo xong sẽ tự động kết nối và chạy ngầm (Worker).
+    """
+    svc = CameraService(db)
+    
+    # 1. Sinh device_id tự động nếu client không gửi lên để tránh lỗi Unique
+    if not cam.device_id:
+        cam_type = "IP" if cam.rtsp_url else "LOCAL"
+        cam.device_id = f"CAM_{cam_type}_{uuid.uuid4().hex[:8].upper()}"
+
+    # 2. Lưu vào Database
+    new_cam = svc.create_camera(cam)
+    
+    # 3. Phân loại Source để chạy Worker ngay lập tức
+    source = None
+    if new_cam.rtsp_url and new_cam.rtsp_url.strip() != "":
+        source = new_cam.rtsp_url.strip()
+    elif new_cam.device_path is not None and str(new_cam.device_path).strip() != "":
+        source = new_cam.device_path.strip()
+        if source.isdigit():
+            source = int(source)
+
+    # 4. Thử start Worker ngay khi vừa thêm vào
+    if source is not None:
+        try:
+            # Gọi worker
+            camera_system.add_camera(new_cam.id, source)
+            
+            # Nếu thành công, update status trong DB thành ACTIVE
+            new_cam.is_connected = 1
+            new_cam.status = "ACTIVE"
+            db.commit()
+            db.refresh(new_cam)
+        except Exception as e:
+            # Nếu không start được ngay (ví dụ sai RTSP, IP cam đang tắt), set lỗi
+            print(f"⚠️ [Create Camera] Có lỗi khi tự động bật luồng cam {new_cam.id}: {e}")
+            new_cam.is_connected = 0
+            new_cam.status = "DISCONNECTED" 
+            db.commit()
+            db.refresh(new_cam)
+            
+    return response_success(new_cam)
 
 @router.get("", response_model=CameraListResponse)
 def get_all_cameras(db: Session = Depends(get_db), skip: int = 0, limit: int = 100,all:bool = True):
     cams = CameraService(db).get_all_cameras(skip, limit, all)
     
     # [FIX CRITICAL] Xử lý lỗi 500 Validation Error
-    # Schema CameraOut hiện tại có thể chỉ chấp nhận 'ACTIVE' | 'DISCONNECTED' | 'ERROR'
-    # Nếu status là 'OFF', Pydantic sẽ throw error.
-    # Ta cần map 'OFF' -> 'DISCONNECTED' cho tầng hiển thị.
     for cam in cams:
         if cam.status == 'OFF':
             cam.status = 'DISCONNECTED'

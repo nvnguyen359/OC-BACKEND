@@ -2,12 +2,8 @@
 import sys
 from pathlib import Path
 from contextlib import asynccontextmanager
+import os
 
-# [FIX PATH] Thêm thư mục gốc vào sys.path
-current_file = Path(__file__).resolve()
-project_root = current_file.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.append(str(project_root))
 
 import uvicorn
 import asyncio
@@ -15,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import OperationalError
 
 # --- Import nội bộ ---
 from app.core.config import settings
@@ -26,8 +23,27 @@ from app.core.check_db import main as check_db_main
 from app.services.socket_service import socket_service
 from app.crud.setting_crud import setting as setting_crud
 from app.db.session import SessionLocal
+# Tắt toàn bộ log của OpenCV (chỉ hiện lỗi Fatal)
+os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 
-# [FIX 1] Đã xóa import 'configure_static_media' gây lỗi.
+# Hoặc chỉ hiện lỗi nghiêm trọng (ERROR), ẩn Warning
+# os.environ["OPENCV_LOG_LEVEL"] = "ERROR"
+# [FIX PATH] Thêm thư mục gốc vào sys.path
+current_file = Path(__file__).resolve()
+project_root = current_file.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+
+# ==========================================
+# 0. KHỞI TẠO DB SỚM (FIX LỖI NO SUCH TABLE)
+# ==========================================
+# Chạy tạo bảng NGAY LẬP TỨC trước khi App khởi động
+# Để tránh lỗi khi code phía dưới query vào bảng settings
+try:
+    print("🛠️ [PRE-BOOT] Checking Database Structure...")
+    check_db_main()
+except Exception as e:
+    print(f"⚠️ [PRE-BOOT] DB Init Warning: {e}")
 
 # ==========================================
 # 1. LIFESPAN
@@ -39,12 +55,6 @@ async def lifespan(app: FastAPI):
         # Thiết lập loop cho socket
         socket_service.set_loop(asyncio.get_running_loop())
     except: pass
-
-    print("✅ [BOOT] Starting System Modules...")
-    try:
-        check_db_main()
-    except Exception as e:
-        print(f"⚠️ [BOOT] Database Warning: {e}")
 
     print("🔄 [BOOT] Initializing Background Workers...")
     try:
@@ -96,11 +106,9 @@ configure_openapi(app)
 
 
 # ==========================================
-# 4. MOUNT SOCKET.IO (FIX LỖI MẤT REALTIME)
+# 4. MOUNT SOCKET.IO
 # ==========================================
 try:
-    # Mount socket app vào đường dẫn /socket.io
-    # socket_service.app chính là instance của socketio.ASGIApp
     app.mount("/socket.io", socket_service.app)
     print("🔌 [SOCKET] Realtime service mounted at /socket.io")
 except Exception as e:
@@ -111,11 +119,19 @@ except Exception as e:
 # 5. MOUNT MEDIA THỦ CÔNG (FIX LỖI ẢNH)
 # ==========================================
 try:
-    db = SessionLocal()
-    # Lấy đường dẫn lưu ảnh từ DB
-    real_media_path_str = setting_crud.get_value(db, "save_media") or "app/media"
-    db.close()
+    # Mặc định
+    real_media_path_str = "app/media"
     
+    # Thử lấy từ DB (Giờ đây DB đã chắc chắn được tạo ở bước 0)
+    try:
+        db = SessionLocal()
+        val = setting_crud.get_value(db, "save_media")
+        if val:
+            real_media_path_str = val
+        db.close()
+    except Exception as db_err:
+        print(f"⚠️ Cannot read settings from DB (using default): {db_err}")
+
     real_media_path = Path(real_media_path_str).resolve()
     
     if not real_media_path.exists():
@@ -125,7 +141,7 @@ try:
     print(f"📂 [MOUNT] URL '/OC-media' -> Real Path '{real_media_path}'")
     
     # Mount cứng đường dẫn ảnh
-    app.mount("/OC-media", StaticFiles(directory=real_media_path), name="media")
+    app.mount("/OC-media", StaticFiles(directory=str(real_media_path)), name="media")
     
 except Exception as e:
     print(f"❌ Media Mount Error: {e}")
@@ -167,4 +183,4 @@ async def serve_spa(full_path: str):
 
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=True)
+    uvicorn.run("app.main:app", host=settings.HOST, port=settings.PORT, reload=False)

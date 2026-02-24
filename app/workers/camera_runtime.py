@@ -21,7 +21,8 @@ from app.crud.setting_crud import setting as setting_crud
 from app.db.session import SessionLocal
 from app.services.google_tts import tts_service
 from app.services.socket_service import socket_service
-from app.services.carrier_Service import carrier_service
+# [FIX LINUX] Đổi tên module thành chữ thường
+from app.services.carrier_service import carrier_service
 
 # Import để query đếm số đơn
 from sqlalchemy import func, distinct

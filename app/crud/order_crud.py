@@ -3,7 +3,7 @@ import os
 import pytz
 from typing import List, Tuple, Dict, Any
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import select, and_, or_, func
+from sqlalchemy import select, and_, or_, func, extract
 from datetime import datetime, timedelta
 from app.db import models, schemas
 from app.crud.base import CRUDBase
@@ -16,6 +16,7 @@ class CRUDOrder(CRUDBase[models.Order, schemas.OrderCreate, schemas.OrderUpdate]
     - Logic "Consolidation": Gom nhóm theo Code (Mới nhất làm Chính, Cũ làm History).
     - Optimization: Loại bỏ object Parent lồng nhau để giảm tải JSON.
     - Tự động dọn dẹp Video/Avatar khi xóa dữ liệu.
+    - [NEW] Bộ lọc theo Tháng, Quý, Năm.
     """
 
     def _get_vn_now(self):
@@ -55,6 +56,9 @@ class CRUDOrder(CRUDBase[models.Order, schemas.OrderCreate, schemas.OrderUpdate]
         date_preset: str = None,
         start_date: datetime = None,
         end_date: datetime = None,
+        month: int = None,    # [NEW] Lọc theo tháng (1-12)
+        quarter: int = None,  # [NEW] Lọc theo quý (1-4)
+        year: int = None,     # [NEW] Lọc theo năm (ví dụ: 2024)
         sort_by: str = "created_at",
         sort_dir: str = "desc",
     ) -> Tuple[List[models.Order], int]:
@@ -74,27 +78,46 @@ class CRUDOrder(CRUDBase[models.Order, schemas.OrderCreate, schemas.OrderUpdate]
             query = query.where(or_(*conditions))
         
         else:
-            # 1.2. Filter by Date (Chỉ chạy khi không search code)
-            today_start = vn_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # 1.2. Filter by Date
             
-            if date_preset == "today":
-                query = query.where(and_(self.model.created_at >= today_start, 
-                                         self.model.created_at < today_start + timedelta(days=1)))
-            elif date_preset == "yesterday":
-                start = today_start - timedelta(days=1)
-                query = query.where(and_(self.model.created_at >= start, self.model.created_at < today_start))
-            elif date_preset == "last7days":
-                query = query.where(self.model.created_at >= today_start - timedelta(days=7))
-            elif date_preset == "last15days":
-                query = query.where(self.model.created_at >= today_start - timedelta(days=15))
-
-            if start_date and end_date:
+            # --- [NEW LOGIC] Lọc theo Năm/Tháng/Quý ---
+            # Sử dụng extract của SQLAlchemy để lấy phần ngày tháng từ DB
+            if year:
+                query = query.where(extract('year', self.model.created_at) == year)
+            
+            if month:
+                query = query.where(extract('month', self.model.created_at) == month)
+            
+            if quarter:
+                # Logic tính quý: (month - 1) / 3 + 1. Ví dụ: Tháng 4 -> (3)/3 + 1 = 2 (Quý 2)
                 query = query.where(
-                    and_(
-                        self.model.created_at >= start_date,
-                        or_(self.model.closed_at <= end_date, self.model.closed_at.is_(None))
-                    )
+                    func.floor((extract('month', self.model.created_at) - 1) / 3) + 1 == quarter
                 )
+
+            # --- Logic Date Preset & Range (Chỉ chạy nếu không có bộ lọc Năm/Tháng/Quý cụ thể để tránh xung đột) ---
+            # (Hoặc bạn có thể bỏ 'if not' nếu muốn kết hợp, nhưng thường thì đã lọc tháng rồi thì không cần lọc 'last7days')
+            if not (year or month or quarter):
+                today_start = vn_now.replace(hour=0, minute=0, second=0, microsecond=0)
+                
+                if date_preset == "today":
+                    query = query.where(and_(self.model.created_at >= today_start, 
+                                             self.model.created_at < today_start + timedelta(days=1)))
+                elif date_preset == "yesterday":
+                    start = today_start - timedelta(days=1)
+                    query = query.where(and_(self.model.created_at >= start, self.model.created_at < today_start))
+                elif date_preset == "last7days":
+                    query = query.where(self.model.created_at >= today_start - timedelta(days=7))
+                elif date_preset == "last15days":
+                    query = query.where(self.model.created_at >= today_start - timedelta(days=15))
+
+                # Lọc theo Range ngày cụ thể (Start/End)
+                if start_date and end_date:
+                    query = query.where(
+                        and_(
+                            self.model.created_at >= start_date,
+                            or_(self.model.closed_at <= end_date, self.model.closed_at.is_(None))
+                        )
+                    )
 
         # 1.3. Filter Status
         if status:

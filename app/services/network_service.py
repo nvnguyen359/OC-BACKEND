@@ -1,135 +1,144 @@
-# app/services/network_service.py
+import os
+import time
 import subprocess
 import platform
-import time
-import logging
-
-logger = logging.getLogger("network")
 
 class NetworkService:
     def __init__(self):
-        self.os_type = platform.system() # 'Windows' hoặc 'Linux'
-        # Trên Orange Pi 3 LTS, interface wifi thường là wlan0. 
-        # Nếu dùng USB Wifi ngoài, có thể là wlx... cần kiểm tra bằng 'ip a'
-        self.interface = "wlan0" 
+        self.interface = "wlan0"
+        self.gateway_ip = "192.168.42.1" 
+        # Tự động nhận diện hệ điều hành đang chạy
+        self.is_windows = platform.system().lower() == "windows"
 
-    def _run_command(self, command):
-        """Hàm wrapper chạy lệnh shell an toàn"""
+    def run_cmd(self, cmd):
         try:
-            result = subprocess.run(
-                command, 
-                shell=True, 
-                check=True, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            # Chỉ log warning để tránh spam log khi scan không thấy mạng
-            logger.warning(f"Command failed: {command} | Error: {e.stderr.strip()}")
-            return None
+            return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode().strip()
+        except:
+            return ""
 
     def check_internet(self):
-        """
-        Kiểm tra mạng bằng cách ping Google DNS (8.8.8.8).
-        Timeout cực ngắn (1s) để boot nhanh.
-        """
-        if self.os_type == "Windows":
-            return True # [DEV] Windows luôn giả định có mạng
+        # Điều chỉnh lệnh ping tương thích với từng HĐH
+        if self.is_windows:
+            return os.system("ping -n 1 -w 2000 8.8.8.8 > nul 2>&1") == 0
+        else:
+            return os.system("ping -c 1 -W 2 8.8.8.8 > /dev/null 2>&1") == 0
+
+    def enable_hotspot(self):
+        print("🔥 [NETWORK] Đang bật chế độ Hotspot...")
         
-        # Ping 1 gói, timeout 1 giây
-        cmd = "ping -c 1 -W 1 8.8.8.8"
-        return self._run_command(cmd) is not None
+        if self.is_windows:
+            print("⚠️ [MOCK WINDOWS] Đã giả lập kích hoạt Hotspot thành công.")
+            return True
+
+        # --- LỆNH THỰC TẾ TRÊN DIETPI ---
+        os.system("systemctl stop hostapd isc-dhcp-server 2>/dev/null")
+        os.system("cp /etc/network/interfaces.hotspot /etc/network/interfaces")
+        
+        os.system(f"ifdown {self.interface} --force; sleep 1; ifup {self.interface} --force")
+        time.sleep(2)
+        
+        os.system(f"ip link set {self.interface} up")
+        os.system(f"ip addr flush dev {self.interface} 2>/dev/null")
+        os.system(f"ip addr add {self.gateway_ip}/24 dev {self.interface} 2>/dev/null")
+        
+        os.system("systemctl start hostapd isc-dhcp-server")
+        print("✅ Hotspot (DietPi) đã bật thành công. Đang chờ thiết bị kết nối...")
+        return True
 
     def scan_wifi(self):
-        """Quét Wifi xung quanh"""
-        if self.os_type == "Windows":
+        print("🔍 [NETWORK] Đang quét Wifi xung quanh...")
+        
+        if self.is_windows:
+            print("⚠️ [MOCK WINDOWS] Trả về danh sách Wifi giả lập.")
             return [
-                {"ssid": "Wifi_Test_1", "signal": 90, "security": "WPA2"},
-                {"ssid": "Wifi_Test_2", "signal": 50, "security": "WPA2"}
+                {"ssid": "Wifi_Test_1", "signal": -50},
+                {"ssid": "Wifi_Test_2", "signal": -75}
             ]
 
-        # nmcli: -t (terse/gọn), -f (fields)
-        cmd = "nmcli -t -f SSID,SIGNAL,SECURITY dev wifi list"
-        output = self._run_command(cmd)
-        
-        networks = []
-        seen_ssids = set()
-        
-        if output:
-            for line in output.split('\n'):
-                # Định dạng nmcli -t dùng dấu : hoặc \: để escape
-                # Xử lý đơn giản bằng split(':')
-                parts = line.split(':')
-                if len(parts) >= 2:
-                    ssid = parts[0]
-                    # Bỏ qua SSID rỗng hoặc trùng lặp
-                    if not ssid or ssid in seen_ssids:
-                        continue
+        # --- LỆNH THỰC TẾ TRÊN DIETPI ---
+        try:
+            os.system(f"ifconfig {self.interface} up")
+            scan_output = self.run_cmd(f"iwlist {self.interface} scan")
+            
+            networks = []
+            current_network = {}
+            for line in scan_output.split('\n'):
+                line = line.strip()
+                if line.startswith("Cell"):
+                    if current_network and 'ssid' in current_network:
+                        networks.append(current_network)
+                    current_network = {}
+                elif line.startswith("ESSID:"):
+                    ssid = line.split('"')[1]
+                    if ssid: 
+                        current_network['ssid'] = ssid
+                elif line.startswith("Quality="):
+                    parts = line.split("Signal level=")
+                    if len(parts) > 1:
+                        signal = int(parts[1].split()[0])
+                        current_network['signal'] = signal
+            
+            if current_network and 'ssid' in current_network:
+                networks.append(current_network)
+            
+            unique_networks = {}
+            for net in networks:
+                ssid = net['ssid']
+                if ssid not in unique_networks or net['signal'] > unique_networks[ssid]['signal']:
+                    unique_networks[ssid] = net
                     
-                    try:
-                        signal = int(parts[1]) if parts[1].isdigit() else 0
-                        security = parts[2] if len(parts) > 2 else ""
-                        
-                        networks.append({
-                            "ssid": ssid,
-                            "signal": signal,
-                            "security": security
-                        })
-                        seen_ssids.add(ssid)
-                    except: pass
-        return networks
+            return list(unique_networks.values())
+        except Exception as e:
+            print(f"❌ Lỗi quét wifi: {e}")
+            return []
 
     def connect_wifi(self, ssid, password):
-        """Kết nối Wifi mới"""
-        logger.info(f"Connecting to Wifi: {ssid}...")
+        print(f"🔗 [NETWORK] Đang cấu hình kết nối tới: '{ssid}'")
         
-        if self.os_type == "Windows":
-            time.sleep(1)
+        if self.is_windows:
+            print("⚠️ [MOCK WINDOWS] Giả lập kết nối thành công.")
+            time.sleep(2)
             return True
 
-        # 1. Xóa profile cũ để tránh lỗi conflict UUID
-        self._run_command(f"nmcli connection delete id '{ssid}'")
-        
-        # 2. Kết nối
-        cmd = f"nmcli dev wifi connect '{ssid}' password '{password}'"
-        result = self._run_command(cmd)
-        return result is not None
+        # --- LỆNH THỰC TẾ TRÊN DIETPI ---
+        wpa_config = f"""ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=VN
 
-    def enable_hotspot(self, ssid="ORDER_CAMERA_SETUP", password="admin_camera"):
-        """
-        Bật Hotspot để người dùng kết nối vào cấu hình.
-        Đây là 'Phao cứu sinh' khi mất mạng.
-        """
-        logger.info(f"Enabling Hotspot: {ssid}")
-        
-        if self.os_type == "Windows":
-            return True
-
-        # 1. Ngắt kết nối hiện tại để giải phóng card wifi
-        self._run_command(f"nmcli dev disconnect {self.interface}")
-        
-        # 2. Xóa kết nối Hotspot cũ (nếu có)
-        self._run_command(f"nmcli connection delete id '{ssid}'")
-
-        # 3. Tạo Hotspot mới (Mode ap - Access Point)
-        # ipv4.method shared: Giúp cấp DHCP cho client kết nối vào
-        cmd = (
-            f"nmcli con add type wifi ifname {self.interface} con-name '{ssid}' "
-            f"autoconnect yes ssid '{ssid}' "
-            f"802-11-wireless.mode ap 802-11-wireless.band bg "
-            f"ipv4.method shared "
-            f"wifi-sec.key-mgmt wpa-psk wifi-sec.psk '{password}'"
-        )
-        if self._run_command(cmd):
-            # Kích hoạt connection vừa tạo
-            return self._run_command(f"nmcli con up '{ssid}'") is not None
-        return False
-
+network={{
+    ssid="{ssid}"
+    psk="{password}"
+}}
+"""
+        try:
+            with open("/tmp/wpa_supplicant.conf", "w") as f:
+                f.write(wpa_config)
+            os.system("cp /tmp/wpa_supplicant.conf /etc/wpa_supplicant/wpa_supplicant.conf")
+            
+            print("⏳ [NETWORK] Đang chuyển sang Client Mode...")
+            os.system("systemctl stop hostapd isc-dhcp-server 2>/dev/null")
+            os.system("cp /etc/network/interfaces.client /etc/network/interfaces")
+            
+            os.system(f"ifdown {self.interface} --force; sleep 1; ifup {self.interface} --force")
+            
+            print("⏳ [NETWORK] Đang xin cấp IP từ Router nhà khách...")
+            time.sleep(10)
+            ip_check = self.run_cmd(f"ip -4 addr show {self.interface}")
+            
+            if "inet " in ip_check and "192.168.42.1" not in ip_check:
+                print("✅ Kết nối thành công!")
+                return True
+            else:
+                print("❌ Kết nối thất bại (Sai pass hoặc Router không cấp IP).")
+                return False
+        except Exception as e:
+            print(f"❌ Lỗi ghi cấu hình wifi: {e}")
+            return False
+            
     def reboot_system(self):
-        """Reboot sau khi cấu hình xong"""
-        if self.os_type != "Windows":
-            self._run_command("reboot")
+        if self.is_windows:
+            print("⚠️ [MOCK WINDOWS] Bỏ qua lệnh reboot trên Windows.")
+        else:
+            os.system("reboot")
 
 network_service = NetworkService()

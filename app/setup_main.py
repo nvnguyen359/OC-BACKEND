@@ -6,6 +6,14 @@ import asyncio
 from pathlib import Path
 import cv2
 import uvicorn
+# -----------------------------------------------------------------------------
+# 2. IMPORTS (Sau khi đã setup path)
+# -----------------------------------------------------------------------------
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 # -----------------------------------------------------------------------------
 # 1. SETUP PATH (PHẢI LÀM ĐẦU TIÊN)
@@ -16,14 +24,6 @@ project_root = current_file.parent.parent # Lên 2 cấp: app -> root
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-# -----------------------------------------------------------------------------
-# 2. IMPORTS (Sau khi đã setup path)
-# -----------------------------------------------------------------------------
-from fastapi import FastAPI, BackgroundTasks
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 # Import Service nội bộ
 try:

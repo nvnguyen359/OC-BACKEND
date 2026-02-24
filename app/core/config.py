@@ -1,5 +1,4 @@
 # app/core/config.py
-
 import os
 import json 
 from pathlib import Path
@@ -7,13 +6,19 @@ from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# [FIX] XÁC ĐỊNH ĐƯỜNG DẪN TUYỆT ĐỐI TỚI FILE .ENV
-# __file__ = .../app/core/config.py
-# .parent  = .../app/core
-# .parent.parent = .../app
-# .parent.parent.parent = .../ (Thư mục gốc chứa .env)
-BASE_DIR = Path(__file__).resolve().parent.parent
-ENV_PATH = BASE_DIR / ".env"
+# [QUAN TRỌNG] TÍNH TOÁN ĐƯỜNG DẪN GỐC (PROJECT ROOT)
+# File này: .../app/core/config.py
+# .parent -> core
+# .parent.parent -> app
+# .parent.parent.parent -> ROOT PROJECT (Thư mục chứa .env)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Đường dẫn tuyệt đối tới file .env
+ENV_PATH = PROJECT_ROOT / ".env"
+
+# [SỬA LẠI] Đường dẫn tuyệt đối tới file DB (Nằm ngay tại GỐC dự án)
+# D:\Projects\OC\OC-BACkEND\adocv1.db
+DB_FILE_PATH = PROJECT_ROOT / "adocv1.db"
 
 class Settings(BaseSettings):
     # Server config
@@ -21,10 +26,10 @@ class Settings(BaseSettings):
     PORT: int = 8000
     RELOAD: bool = True
 
-    # Database
-    DB_URL: str = "sqlite:///./app/db/adocv1.db"
+    # [FIX] Luôn dùng đường dẫn tuyệt đối trỏ về file ở GỐC
+    DB_URL: str = f"sqlite:///{DB_FILE_PATH}"
 
-    # JWT config (CHỮ IN HOA)
+    # JWT config
     JWT_SECRET: str = "default_secret_key"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 6000
@@ -34,12 +39,12 @@ class Settings(BaseSettings):
     OPENCV_LOG_LEVEL: str = "OFF"
     OPENCV_VIDEOIO_PRIORITY_MSMF: int = 0
 
-    # Pagination defaults
+    # Pagination
     DEFAULT_PAGE: int = 0
     DEFAULT_PAGE_SIZE: int = 100
     MAX_PAGE_SIZE: int = 1500
 
-    # CORS origins
+    # CORS
     ALLOWED_ORIGINS: Union[List[str], str] = []
 
     @field_validator("ALLOWED_ORIGINS", mode="before")
@@ -47,31 +52,27 @@ class Settings(BaseSettings):
     def parse_allowed_origins(cls, v: Union[str, List[str]]) -> List[str]:
         if isinstance(v, str):
             if not v: return []
-            if v.strip().startswith("["):
-                try:
-                    return json.loads(v)
-                except json.JSONDecodeError:
-                    return []
-            return [origin.strip() for origin in v.split(",")]
+            try: return json.loads(v)
+            except: return [origin.strip() for origin in v.split(",")]
         elif isinstance(v, list):
             return v
         return []
 
     model_config = SettingsConfigDict(
-        # [QUAN TRỌNG] Trỏ thẳng vào đường dẫn tuyệt đối của file .env
         env_file=str(ENV_PATH),
         env_file_encoding="utf-8",
-        case_sensitive=True,
         extra="ignore"
     )
 
-# Khởi tạo settings ở cuối file
 settings = Settings()
 
-# [DEBUG LOG] In ra để kiểm tra
+# [FIX LOGIC - GHI ĐÈ CUỐI CÙNG]
+# Bất kể file .env viết gì (kể cả viết sai thành ./app/db/...), 
+# ta vẫn ép buộc nó quay về đúng DB_FILE_PATH đã định nghĩa ở trên.
+settings.DB_URL = f"sqlite:///{DB_FILE_PATH}"
+
 print("---------------------------------------------------")
-print(f"✅ [Config] Config File: {__file__}")
-print(f"✅ [Config] Env Path Target: {ENV_PATH}")
-print(f"✅ [Config] Env Exists: {ENV_PATH.exists()}")
-print(f"🔓 [Config] ALLOWED_ORIGINS: {settings.ALLOWED_ORIGINS}")
+print(f"📂 [Config] Project Root: {PROJECT_ROOT}")
+print(f"📂 [Config] Database File: {DB_FILE_PATH}")
+print(f"📂 [Config] FINAL DB URL: {settings.DB_URL}")
 print("---------------------------------------------------")
