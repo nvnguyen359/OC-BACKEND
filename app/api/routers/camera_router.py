@@ -8,7 +8,8 @@ import numpy as np
 from datetime import datetime
 from typing import List, Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Query
+# [FIX] Đã thêm Request vào để bắt sự kiện ngắt kết nối trình duyệt
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -167,22 +168,45 @@ async def websocket_ai_overlay(
 # 2. STREAM & SNAPSHOT
 # =========================================================
 
+# [FIX CỰC MẠNH]: Danh sách lưu cờ ngắt luồng. Giải quyết lỗi treo trình duyệt khi chuyển trang
+active_streams = {}
+
 @router.get("/{cam_id}/stream")
-async def get_camera_stream(cam_id: int):
+async def get_camera_stream(cam_id: int, request: Request):
     cam = camera_system.cameras.get(cam_id)
     if not cam: raise HTTPException(status_code=404, detail="Camera not active in background")
     
+    # 1. Nếu có luồng cũ đang kẹt của camera này -> Cắt đứt luồng cũ để nhường chỗ
+    if cam_id in active_streams:
+        active_streams[cam_id].set()
+        await asyncio.sleep(0.1)
+        
+    # 2. Tạo cờ an toàn cho luồng mới
+    stop_event = asyncio.Event()
+    active_streams[cam_id] = stop_event
+
     async def iterfile():
-        while True:
-            try:
+        try:
+            while True:
+                # 3. Ép dừng vô điều kiện nếu tắt tab hoặc bị luồng khác chiếm quyền
+                if await request.is_disconnected() or stop_event.is_set():
+                    break
+
                 frame_bytes = cam.get_jpeg()
                 if frame_bytes:
                     yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                 else:
                     yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + PLACEHOLDER_BYTES + b'\r\n')
+                    
                 await asyncio.sleep(0.03 if frame_bytes else 0.2)
-            except GeneratorExit: break
-            except Exception: break
+                
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # 4. Xóa cờ khi luồng chết hẳn để làm sạch bộ nhớ
+            if active_streams.get(cam_id) == stop_event:
+                del active_streams[cam_id]
+
     return StreamingResponse(iterfile(), media_type="multipart/x-mixed-replace;boundary=frame")
 
 @router.get("/{cam_id}/snapshot")

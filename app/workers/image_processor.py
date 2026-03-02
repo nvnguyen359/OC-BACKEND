@@ -78,15 +78,20 @@ class ImageProcessor:
             # Fallback nếu có lỗi bất ngờ
             return frame.copy()
 
-    def draw_text(self, frame, text, x, y, color=None):
-        if color is None: color = self.text_color
-        try:
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            # Vẽ viền đen (thickness + 3) để chữ nổi bật trên nền sáng
-            cv2.putText(frame, text, (x, y), font, self.font_scale, (0, 0, 0), self.thickness + 1, cv2.LINE_AA)
-            # Vẽ chữ chính
-            cv2.putText(frame, text, (x, y), font, self.font_scale, color, self.thickness, cv2.LINE_AA)
-        except: pass
+    def draw_text(self, frame, text, x, y, color=None, scale=None, thickness=None):
+            if color is None: color = self.text_color
+            
+            # Dùng cỡ chữ/độ nét tùy chỉnh nếu có truyền vào, ngược lại dùng mặc định
+            current_scale = scale if scale is not None else self.font_scale
+            current_thickness = thickness if thickness is not None else self.thickness
+            
+            try:
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                # Vẽ viền đen để chữ nổi bật trên nền sáng
+                cv2.putText(frame, text, (x, y), font, current_scale, (0, 0, 0), current_thickness + 1, cv2.LINE_AA)
+                # Vẽ chữ chính
+                cv2.putText(frame, text, (x, y), font, current_scale, color, current_thickness, cv2.LINE_AA)
+            except: pass
 
     def to_jpeg(self, frame):
         try:

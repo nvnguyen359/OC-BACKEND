@@ -5,18 +5,21 @@ import time
 import queue
 import threading
 import subprocess
-from datetime import datetime
+from dotenv import load_dotenv
+
 from app.db.session import SessionLocal
 from app.db.models import Setting, Order
-
-# [NÂNG CẤP] Import service Google Drive và Order Repository
-from app.services.gdrive_service import gdrive_service
 from app.services.order_repository import order_repo
+
+# Load biến môi trường từ file .env
+load_dotenv()
 
 class LocalMediaService:
     def __init__(self):
         self.default_folder = "OC-media"
         self.post_process_queue = queue.Queue()
+        
+        # Luồng duy nhất: Nén Video (Chạy ngay sau khi chốt đơn và chỉ lưu cục bộ)
         threading.Thread(target=self._video_converter_worker, daemon=True).start()
 
     def get_storage_path(self) -> str:
@@ -42,8 +45,8 @@ class LocalMediaService:
         writer = cv2.VideoWriter(filepath, cv2.VideoWriter_fourcc(*'MJPG'), fps, (width, height))
         return writer, filepath
 
-    # [NÂNG CẤP] Thêm order_id để tự động update DB khi có link Drive
     def save_snapshot(self, frame, code: str, order_id: int = None) -> str:
+        """Chỉ lưu ảnh cục bộ thật nhanh, trả về đường dẫn local"""
         try:
             root = self.get_storage_path()
             d = os.path.join(root, "avatars")
@@ -51,22 +54,13 @@ class LocalMediaService:
             filename = f"{code}.jpg"
             full_path = os.path.join(d, filename)
             
-            # Lưu ảnh tạm ra máy
+            # Lưu ảnh ra máy ngay lập tức (Không upload ở đây)
             cv2.imwrite(full_path, frame)
             
-            # [NÂNG CẤP] Đẩy lên Google Drive
-            drive_link = gdrive_service.upload_file_and_get_link(full_path, mime_type='image/jpeg')
+            if order_id:
+                order_repo.update_avatar(order_id, full_path)
             
-            if drive_link:
-                if order_id:
-                    order_repo.update_avatar(order_id, drive_link)
-                # Tối ưu: Xóa ảnh ở Pi để tiết kiệm bộ nhớ sau khi lên cloud thành công
-                if os.path.exists(full_path):
-                    os.remove(full_path) 
-                return drive_link
-            else:
-                # Fallback: Trả về link cục bộ nếu upload Drive thất bại
-                return f"{root}/avatars/{filename}"
+            return full_path
                 
         except Exception as e:
             print(f"❌ Snapshot Error: {e}")
@@ -80,6 +74,7 @@ class LocalMediaService:
             })
 
     def _video_converter_worker(self):
+        """Nén video xong chỉ lưu cục bộ"""
         while True:
             try:
                 task = self.post_process_queue.get()
@@ -88,7 +83,6 @@ class LocalMediaService:
                 src = task['src']
                 order_id = task['order_id']
                 
-                # Kiểm tra lại file gốc có tồn tại không
                 if not os.path.exists(src):
                     continue
 
@@ -100,9 +94,9 @@ class LocalMediaService:
                 filename = f"{task['code']}_{int(task['created_at'].timestamp())}.mp4"
                 dest = os.path.join(final_dir, filename)
                 
-                # [BẢO VỆ PHẦN CỨNG]: Ép FFmpeg chạy 1 nhân, giảm chất lượng nhẹ
+                # Ép FFmpeg chạy 1 nhân, tối ưu phần cứng Orange Pi
                 cmd = [
-                    'ffmpeg', '-y', '-v', 'error', # Chỉ hiện log lỗi để đỡ rác console
+                    'ffmpeg', '-y', '-v', 'error', 
                     '-i', src,
                     '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30',
                     '-threads', '1', 
@@ -111,47 +105,40 @@ class LocalMediaService:
                 ]
                 subprocess.run(cmd)
                 
-                if os.path.exists(dest) and os.path.getsize(dest) > 1024: # Lớn hơn 1KB mới là file chuẩn
-                    if os.path.exists(src): os.remove(src) # Xóa file tạm (.avi)
-                    print(f"✅ Video Converted locally: {filename}")
+                # Kiểm tra nén thành công
+                if os.path.exists(dest) and os.path.getsize(dest) > 1024:
+                    print(f"✅ Đã nén thành công MP4: {filename} (Chờ Up Drive ban đêm)")
                     
-                    # [NÂNG CẤP] Đẩy video MP4 lên Google Drive
-                    drive_link = gdrive_service.upload_file_and_get_link(dest, mime_type='video/mp4')
+                    # Xóa dọn dẹp file .avi gốc an toàn
+                    try:
+                        if os.path.exists(src):
+                            os.remove(src)
+                            print(f"🗑️ Đã dọn dẹp file gốc: {src}")
+                    except Exception as del_err:
+                        print(f"⚠️ Hệ điều hành khóa file, chưa thể xóa {src}: {del_err}")
                     
                     if order_id:
                         try:
                             with SessionLocal() as db:
                                 order = db.query(Order).get(order_id)
                                 if order:
-                                    # Nếu có drive_link thì dùng, không thì lưu đường dẫn local (Fallback)
-                                    if drive_link:
-                                        order.path_video = drive_link
-                                    else:
-                                        order.path_video = f"{root}/videos/{date_str}/{filename}"
-                                    
+                                    order.path_video = f"{root}/videos/{date_str}/{filename}"
                                     db.commit()
-                                    if drive_link:
-                                        print(f"✅ Đã lưu link Drive vào Database cho đơn {task['code']}")
-                                    
                         except Exception as db_err:
                             print(f"⚠️ DB Update Error: {db_err}")
-                            
-                    # Nếu upload Drive thành công, xóa file MP4 ở máy đi cho nhẹ
-                    if drive_link and os.path.exists(dest):
-                        os.remove(dest)
-                        print(f"🗑️ Đã xóa video cục bộ {filename} để tiết kiệm dung lượng.")
-                        
                 else:
-                    # Nếu convert lỗi, cố gắng xóa file tạm để chống đầy ổ cứng
+                    # Nén thất bại cũng cố gắng dọn file .avi
+                    try:
+                        if os.path.exists(src): os.remove(src)
+                    except: pass
                     print(f"❌ Video Convert FAILED: {filename}")
-                    if os.path.exists(src): os.remove(src)
 
-                # [HẠ NHIỆT CPU]: Nghỉ 3 giây trước khi nén video tiếp theo
+                # Hạ nhiệt CPU
                 time.sleep(3.0)
 
             except Exception as e:
                 print(f"❌ Convert Worker Error: {e}")
-                time.sleep(1.0) # Tránh crash vòng lặp vô hạn
+                time.sleep(1.0) 
 
 # Singleton Instance
 media_service = LocalMediaService()

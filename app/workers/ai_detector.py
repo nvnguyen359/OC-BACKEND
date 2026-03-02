@@ -3,75 +3,129 @@ import os
 import sys
 import time
 import signal
+import urllib.request
 import numpy as np
 from multiprocessing import Queue
 
-# --- CẤU HÌNH HỆ THỐNG ---
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 
-# 1. IMPORT OPENCV
 try: 
     import cv2
     print("✅ [AI Check] OpenCV imported successfully.")
 except ImportError as e: 
     cv2 = None
-    print(f"❌ [AI Check] OpenCV MISSING: {e}")
 
-# 2. IMPORT YOLO (HUMAN DETECTION)
 try: 
     from ultralytics import YOLO
     import torch
     torch.set_num_threads(1)
     HAS_YOLO = True
-    print("✅ [AI Check] Ultralytics (YOLO) imported successfully.")
-except ImportError as e: 
+except ImportError: 
     YOLO = None
     HAS_YOLO = False
-    print(f"❌ [AI Check] Ultralytics MISSING (No Human Detect): {e}")
 
-# 3. IMPORT PYZBAR (QR/BARCODE)
+# BẬT LẠI PYZBAR
 try:
     from pyzbar import pyzbar
     from pyzbar.pyzbar import ZBarSymbol
     HAS_ZBAR = True
-    print("✅ [AI Check] Pyzbar imported successfully.")
-except ImportError as e:
+except ImportError:
     pyzbar = None
     HAS_ZBAR = False
-    print(f"❌ [AI Check] Pyzbar MISSING. Run 'apt install libzbar0'. Error: {e}")
+
+def download_wechat_models():
+    # Ưu tiên sử dụng model ở ngay thư mục gốc
+    if os.path.exists("./detect.prototxt") and os.path.exists("./detect.caffemodel"):
+        print("✅ [AI Process] Tìm thấy file model WeChat QR tại thư mục hiện tại.")
+        return "./"
+
+    # Nếu không có ở thư mục gốc mới thử tải xuống
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "..", "models", "wechat_qr")
+    os.makedirs(model_dir, exist_ok=True)
+    base_url = "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/"
+    files = ["detect.prototxt", "detect.caffemodel", "sr.prototxt", "sr.caffemodel"]
+    
+    opener = urllib.request.build_opener()
+    opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+    urllib.request.install_opener(opener)
+
+    for file in files:
+        file_path = os.path.join(model_dir, file)
+        if not os.path.exists(file_path):
+            try: 
+                urllib.request.urlretrieve(base_url + file, file_path)
+            except Exception: 
+                return None
+    return model_dir
 
 def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
-    """
-    Tiến trình AI độc lập: Xử lý QR Code (3 Lớp) và Phát hiện người
-    """
     try: signal.signal(signal.SIGINT, signal.SIG_IGN)
     except: pass
 
     print(f"🤖 [AI Process] Started. PID: {os.getpid()}")
     
-    # --- LOAD MODEL YOLO ---
     model = None
-    if HAS_YOLO:
-        if os.path.exists(model_path):
-            try: 
-                model = YOLO(model_path)
-                print(f"✅ [AI Process] YOLO Model Loaded: {model_path}")
-            except Exception as e: 
-                print(f"❌ [AI Process] Failed to load YOLO: {e}")
-        else:
-            print(f"❌ [AI Process] Weights not found: {model_path}")
+    if HAS_YOLO and os.path.exists(model_path):
+        try: model = YOLO(model_path)
+        except: pass
+
+    wechat_detector = None
+    fallback_qr_detector = None
     
-    # Khởi tạo bộ cân bằng ánh sáng cục bộ (CLAHE) - Giúp đọc mã in mờ/bóng
+    # Khởi tạo bộ cân bằng sáng
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if cv2 else None
+    
+    if cv2:
+        wechat_model_dir = download_wechat_models()
+        if wechat_model_dir:
+            p_detect = os.path.join(wechat_model_dir, "detect.prototxt")
+            m_detect = os.path.join(wechat_model_dir, "detect.caffemodel")
+            p_sr = os.path.join(wechat_model_dir, "sr.prototxt")
+            m_sr = os.path.join(wechat_model_dir, "sr.caffemodel")
+
+            if not os.path.exists(p_sr) or not os.path.exists(m_sr):
+                p_sr = ""
+                m_sr = ""
+                
+            # [QUAN TRỌNG] Bổ sung 2 dòng này để ÉP TẮT tính năng phóng to (Giảm lag 300% cho Opi3)
+            p_sr = ""
+            m_sr = ""
+
+            # Thử khởi tạo WeChat QR an toàn
+            try:
+                # [TỐI ƯU ARM] Truyền p_sr và m_sr rỗng để TẮT mạng Super Resolution (Siêu phân giải).
+                if hasattr(cv2, 'wechat_qrcode_WeChatQRCode'):
+                    wechat_detector = cv2.wechat_qrcode_WeChatQRCode(p_detect, m_detect, p_sr, m_sr)
+                    print("✅ [AI Process] Đã nạp WeChat QR (Chế độ siêu tốc/Tắt SR)!")
+                elif hasattr(cv2, 'wechat_qrcode') and hasattr(cv2.wechat_qrcode, 'WeChatQRCode'):
+                    wechat_detector = cv2.wechat_qrcode.WeChatQRCode(p_detect, m_detect, p_sr, m_sr)
+                    print("✅ [AI Process] Đã nạp WeChat QR (Chế độ siêu tốc/Tắt SR)!")
+            except:
+                pass # Nuốt lỗi nếu phiên bản OpenCV không tương thích
+
+        # Kích hoạt Fallback nếu WeChat QR không tồn tại
+        if wechat_detector is None:
+            print("⚠️ [AI Process] Mạch ARM kích hoạt bộ quét dự phòng (Pyzbar 3 Lớp + CV2)!")
+            try: fallback_qr_detector = cv2.QRCodeDetector()
+            except: pass
+
+    frame_counter = 0     
+    last_human_cache = []     
 
     while True:
         try:
-            try:
-                frame_data = input_queue.get(timeout=0.1)
-            except:
-                continue
+            frame_data = None
+            while not input_queue.empty():
+                try: frame_data = input_queue.get_nowait()
+                except: break
             
+            if frame_data is None:
+                try: frame_data = input_queue.get(timeout=0.05)
+                except: continue
+            
+            frame_counter += 1
             img = frame_data.get('image')
             cam_id = frame_data.get('cam_id')
             target_w = frame_data.get('target_w', 1280)
@@ -84,123 +138,130 @@ def run_ai_process(input_queue: Queue, output_queue: Queue, model_path: str):
             scale_y = target_h / h_input if h_input > 0 else 1.0
 
             detections = []
+            has_code = False
             
-            # ------------------------------------------------------------------
-            # 1. XỬ LÝ QUÉT MÃ (CHIẾN THUẬT 3 LỚP)
-            # ------------------------------------------------------------------
-            if HAS_ZBAR and cv2:
-                try:
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            if cv2:
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                
+                # ========================================================
+                # [A] WECHAT QR (NẾU ĐÃ CÀI OPENCV-CONTRIB)
+                # ========================================================
+                if wechat_detector:
+                    res, points = wechat_detector.detectAndDecode(gray)
+                    if res:
+                        for i, content in enumerate(res):
+                            if content:
+                                has_code = True
+                                pts = points[i].astype(int)
+                                x, y, w, h = cv2.boundingRect(pts)
+                                detections.append({
+                                    "type": "qrcode",
+                                    "box": [int(x*scale_x), int(y*scale_y), int(w*scale_x), int(h*scale_y)],
+                                    "label": content, "code": content, "color": "#2ecc71"
+                                })
+                
+                # ========================================================
+                # [B] FALLBACK MODE CHO OPi3 (PYZBAR + CV2 KÈM ZOOM)
+                # ========================================================
+                else:
+                    target_symbols = [ZBarSymbol.QRCODE, ZBarSymbol.CODE128, ZBarSymbol.CODE39, ZBarSymbol.EAN13] if HAS_ZBAR else []
                     
-                    # --- LỚP 1: Quét nhanh ảnh gốc (Dành cho mã to, rõ) ---
-                    decoded_objects = pyzbar.decode(gray, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
+                    # LỚP 1: QUÉT ẢNH GỐC NHANH
+                    if HAS_ZBAR:
+                        decoded = pyzbar.decode(gray, symbols=target_symbols)
+                        for obj in decoded:
+                            content = obj.data.decode("utf-8")
+                            x, y, w, h = obj.rect
+                            has_code = True
+                            detections.append({
+                                "type": "code",
+                                "box": [int(x*scale_x), int(y*scale_y), int(w*scale_x), int(h*scale_y)],
+                                "label": content, "code": content, "color": "#3498db"
+                            })
                     
-                    found_in_zoom = False
-                    
-                    # --- LỚP 2: Zoom & Enhance (Dành cho mã nhỏ, xa) ---
-                    if not decoded_objects:
-                        # Cắt vùng trung tâm 60%
+                    # LỚP 2: PHÓNG TO VÀ LÀM NÉT
+                    if not has_code and (frame_counter % 2 == 0):
                         crop_ratio = 0.6
                         crop_h, crop_w = int(h_input * crop_ratio), int(w_input * crop_ratio)
                         start_y, start_x = (h_input - crop_h) // 2, (w_input - crop_w) // 2
                         
                         roi = gray[start_y:start_y+crop_h, start_x:start_x+crop_w]
                         
-                        # Phóng to 2x (Upscale) để mã rõ hơn
-                        # Dùng INTER_LINEAR nhanh hơn và mượt hơn cho mã vạch
                         zoom_factor = 2.0
-                        roi_zoomed = cv2.resize(roi, None, fx=zoom_factor, fy=zoom_factor, interpolation=cv2.INTER_LINEAR)
+                        roi_zoomed = cv2.resize(roi, None, fx=zoom_factor, fy=zoom_factor, interpolation=cv2.INTER_CUBIC)
                         
-                        # Tăng tương phản cục bộ (CLAHE)
-                        roi_enhanced = clahe.apply(roi_zoomed) if clahe else roi_zoomed
+                        kernel_sharpening = np.array([[-1, -1, -1], [-1,  9, -1], [-1, -1, -1]])
+                        roi_sharpened = cv2.filter2D(roi_zoomed, -1, kernel_sharpening)
                         
-                        decoded_roi = pyzbar.decode(roi_enhanced, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
+                        roi_enhanced = clahe.apply(roi_sharpened) if clahe else roi_sharpened
                         
-                        # --- LỚP 3: Thresholding (Dành cho mã in mờ, giấy than) ---
-                        if not decoded_roi:
-                            # Nhị phân hóa: Biến ảnh thành đen/trắng hoàn toàn
-                            # Block size 21, C=4 giúp lọc nhiễu nền giấy tốt
-                            roi_bin = cv2.adaptiveThreshold(roi_enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 4)
-                            decoded_roi = pyzbar.decode(roi_bin, symbols=[ZBarSymbol.QRCODE, ZBarSymbol.CODE128])
+                        if HAS_ZBAR:
+                            decoded_roi = pyzbar.decode(roi_enhanced, symbols=target_symbols)
+                            if not decoded_roi:
+                                roi_bin = cv2.adaptiveThreshold(roi_enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 4)
+                                decoded_roi = pyzbar.decode(roi_bin, symbols=target_symbols)
 
-                        # Nếu tìm thấy ở lớp 2 hoặc 3, map tọa độ về ảnh gốc
-                        if decoded_roi:
-                            found_in_zoom = True
-                            for obj in decoded_roi:
-                                content = obj.data.decode("utf-8")
-                                zx, zy, zw, zh = obj.rect
-                                
-                                # Tính ngược tọa độ từ ảnh Zoom về ảnh Gốc
-                                real_roi_x = int(zx / zoom_factor)
-                                real_roi_y = int(zy / zoom_factor)
-                                real_roi_w = int(zw / zoom_factor)
-                                real_roi_h = int(zh / zoom_factor)
-                                
-                                final_x = start_x + real_roi_x
-                                final_y = start_y + real_roi_y
-                                
-                                detections.append({
-                                    "type": "qrcode",
-                                    "box": [
-                                        int(final_x * scale_x), int(final_y * scale_y), 
-                                        int(real_roi_w * scale_x), int(real_roi_h * scale_y)
-                                    ],
-                                    "label": content,
-                                    "code": content, 
-                                    "code_type": str(obj.type),
-                                    "color": "#2ecc71"
+                            if decoded_roi:
+                                for obj in decoded_roi:
+                                    content = obj.data.decode("utf-8")
+                                    zx, zy, zw, zh = obj.rect
+                                    
+                                    real_x, real_y = int(zx/zoom_factor), int(zy/zoom_factor)
+                                    real_w, real_h = int(zw/zoom_factor), int(zh/zoom_factor)
+                                    final_x, final_y = start_x + real_x, start_y + real_y
+                                    
+                                    has_code = True
+                                    detections.append({
+                                        "type": "code",
+                                        "box": [int(final_x*scale_x), int(final_y*scale_y), int(real_w*scale_x), int(real_h*scale_y)],
+                                        "label": content, "code": content, "color": "#3498db"
+                                    })
+                        
+                        if not has_code and fallback_qr_detector:
+                            retval, decoded_info, points, _ = fallback_qr_detector.detectAndDecodeMulti(roi_enhanced)
+                            if retval and len(decoded_info) > 0:
+                                for i, content in enumerate(decoded_info):
+                                    if content:
+                                        has_code = True
+                                        pts = points[i].astype(int)
+                                        x, y, w, h = cv2.boundingRect(pts)
+                                        
+                                        real_x, real_y = int(x/zoom_factor), int(y/zoom_factor)
+                                        real_w, real_h = int(w/zoom_factor), int(h/zoom_factor)
+                                        final_x, final_y = start_x + real_x, start_y + real_y
+                                        
+                                        detections.append({
+                                            "type": "qrcode",
+                                            "box": [int(final_x*scale_x), int(final_y*scale_y), int(real_w*scale_x), int(real_h*scale_y)],
+                                            "label": content, "code": content, "color": "#2ecc71"
+                                        })
+
+            # ========================================================
+            # [C] YOLO HIỆU SUẤT CAO
+            # ========================================================
+            if model and not has_code:
+                if frame_counter % 5 == 0:
+                    last_human_cache = [] 
+                    try:
+                        results = model.predict(img, imgsz=256, conf=0.5, verbose=False, classes=[0], device='cpu')
+                        for r in results:
+                            for box in r.boxes:
+                                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                                last_human_cache.append({
+                                    "type": "human",
+                                    "box": [int(x1*scale_x), int(y1*scale_y), int((x2-x1)*scale_x), int((y2-y1)*scale_y)], 
+                                    "label": "Human", "color": "#e74c3c"
                                 })
+                    except: pass
+                
+                if last_human_cache: detections.extend(last_human_cache)
+            else:
+                last_human_cache = []
 
-                    # Xử lý kết quả lớp 1 (nếu có)
-                    if not found_in_zoom and decoded_objects:
-                        for obj in decoded_objects:
-                            content = obj.data.decode("utf-8")
-                            x, y, w, h = obj.rect
-                            detections.append({
-                                "type": "qrcode",
-                                "box": [
-                                    int(x * scale_x), int(y * scale_y), 
-                                    int(w * scale_x), int(h * scale_y)
-                                ],
-                                "label": content,
-                                "code": content, 
-                                "code_type": str(obj.type),
-                                "color": "#2ecc71"
-                            })
-                            
-                except Exception as e:
-                    print(f"⚠️ [AI QR] Scan Error: {e}")
-
-            # ------------------------------------------------------------------
-            # 2. XỬ LÝ PHÁT HIỆN NGƯỜI (HUMAN DETECTION)
-            # ------------------------------------------------------------------
-            if model:
-                try:
-                    # Predict với imgsz nhỏ (320) để tối ưu tốc độ CPU
-                    results = model.predict(img, imgsz=320, conf=0.5, verbose=False, classes=[0], device='cpu')
-                    for r in results:
-                        for box in r.boxes:
-                            x1, y1, x2, y2 = box.xyxy[0].tolist()
-                            detections.append({
-                                "type": "human",
-                                "box": [
-                                    int(x1 * scale_x), int(y1 * scale_y), 
-                                    int((x2 - x1) * scale_x), int((y2 - y1) * scale_y)
-                                ], 
-                                "label": f"Human {int(box.conf[0]*100)}%",
-                                "color": "#e74c3c"
-                            })
-                except Exception as e:
-                    print(f"⚠️ [AI YOLO] Error: {e}")
-
-            # Gửi dữ liệu về Main Process
             if not output_queue.full():
                 output_queue.put({'cam_id': cam_id, 'data': detections})
 
-        except KeyboardInterrupt:
-            break
-        except Exception as e: 
-            print(f"⚠️ [AI Process] Loop Error: {e}")
-            continue
+        except KeyboardInterrupt: break
+        except Exception: continue
             
     print("🛑 [AI Process] Stopped.")

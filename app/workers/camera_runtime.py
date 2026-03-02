@@ -21,18 +21,14 @@ from app.crud.setting_crud import setting as setting_crud
 from app.db.session import SessionLocal
 from app.services.google_tts import tts_service
 from app.services.socket_service import socket_service
-# [FIX LINUX] Đổi tên module thành chữ thường
 from app.services.carrier_service import carrier_service
 
-# Import để query đếm số đơn
 from sqlalchemy import func, distinct
 from app.db import models 
 
-# --- CẤU HÌNH CỤC BỘ ---
 os.environ["OPENCV_LOG_LEVEL"] = "OFF"
 RECONNECT_DELAY = 5.0
 
-# --- HÀM VALIDATE MÃ VẬN ĐƠN ---
 def validate_shipping_code(code: str) -> bool:
     if not code: return False
     code = str(code).upper().strip()
@@ -51,18 +47,21 @@ class CameraRuntime:
     def __init__(self, cam_id: int, source: Any, ai_queue: multiprocessing.Queue):
         self.cam_id = cam_id
         self.ai_queue = ai_queue
-        
         self.current_avatar_path = None 
-        self.target_w, self.target_h = get_system_resolution()
-        print(f"🔧 [Cam {cam_id}] Resolution: {self.target_w}x{self.target_h}")
-
+        
+        self.target_w, self.target_h = 854, 480 
         self.fps_record = 10.0
         self.fps_view_limit = 15.0
-        self.ai_interval = 12
+        self.ai_interval = 3
+        self.enable_audio = True
         
         self.stream = CameraStream(source, cam_id)
         self.img_proc = ImageProcessor()
         self.machine = PackingStateMachine()
+        
+        self._load_and_apply_settings()
+        print(f"🔧 [Cam {cam_id}] Stream/UI Target Resolution: {self.target_w}x{self.target_h}")
+
         self.recorder = VideoRecorder(fps=self.fps_record) 
 
         self.is_running = False
@@ -90,9 +89,6 @@ class CameraRuntime:
         self.last_spoken_code = None
         self.last_code_speak_time = 0 
 
-        self._load_and_apply_settings()
-        self.recorder.fps = self.fps_record
-
         self.start()
 
     @property
@@ -108,27 +104,37 @@ class CameraRuntime:
                 payload = data.copy() if isinstance(data, dict) else {}
                 payload['cam_id'] = self.cam_id
                 socket_service.broadcast_event(event_name, payload)
-            except Exception as e: print(f"⚠️ [Socket Error] {e}")
+            except Exception as e: pass
 
     def _load_and_apply_settings(self):
-        try:
-            db = SessionLocal()
-            settings = setting_crud.get_all_as_dict(db)
-            db.close()
-            
-            timeout = int(settings.get("timeout_no_human", "60"))
-            end_time = settings.get("work_end_time", "18:30")
-            self.read_end_digits_count = int(settings.get("read_end_order", "5"))
-            self.machine.update_config(timeout, end_time)
+            try:
+                db = SessionLocal()
+                settings = setting_crud.get_all_as_dict(db)
+                db.close()
+                
+                try:
+                    db_w = int(settings.get("camera_width", "854"))
+                    db_h = int(settings.get("camera_height", "480"))
+                    self.target_w, self.target_h = db_w, db_h
+                except ValueError:
+                    self.target_w, self.target_h = 854, 480
+                
+                timeout = int(settings.get("timeout_no_human", "60"))
+                end_time = settings.get("work_end_time", "18:30")
+                self.read_end_digits_count = int(settings.get("read_end_order", "5"))
+                self.machine.update_config(timeout, end_time)
 
-            self.fps_record = float(settings.get("perf_record_fps", "10.0"))
-            self.fps_view_limit = float(settings.get("perf_view_fps", "15.0"))
-            self.ai_interval = int(settings.get("perf_ai_interval", "12"))
-            print(f"⚙️ [Config Cam {self.cam_id}] RecFPS={self.fps_record} | AI_Int={self.ai_interval}")
+                self.fps_record = float(settings.get("perf_record_fps", "10.0"))
+                self.fps_view_limit = float(settings.get("perf_view_fps", "15.0"))
+                
+                self.ai_interval = int(settings.get("perf_ai_interval", "3"))
+                if self.ai_interval <= 0:
+                    self.ai_interval = 3
+                    
+                self.enable_audio = str(settings.get("enable_audio", "true")).lower() == "true"
+                    
+            except Exception as e: pass
 
-        except Exception as e: print(f"⚠️ Config Load Err: {e}")
-
-    # --- CONTROL ---
     def start(self):
         if self.is_running: return
         self.is_running = True
@@ -139,18 +145,15 @@ class CameraRuntime:
         self.is_running = False
         if self.thread: self.thread.join(timeout=2.0)
         self._do_stop_order(self.machine.current_code, OrderNote.SYSTEM_RESTART)
-        self.stream.release()
         with self.lock: self.is_connected = False
 
     def start_recording(self, code):
-        print(f"🔴 Force Start: {code}")
         self.stop_deadline = 0 
         self.pending_stop_data = None
         if self.machine.force_start(code) == Action.START_ORDER:
             self._do_start_order(code, note=OrderNote.MANUAL)
 
     def stop_recording(self):
-        print(f"⚪ Force Stop")
         self.stop_deadline = 0
         self.pending_stop_data = None
         action, code = self.machine.manual_stop()
@@ -166,17 +169,15 @@ class CameraRuntime:
             return self.img_proc.to_jpeg(self.raw_frame_for_ai)
 
     def _safe_speak(self, text):
+        if not self.enable_audio: return
         try:
             if text:
                 tts_service.speak(text)
-        except Exception as e:
-            print(f"🔇 [TTS Ignored] Audio Driver Error: {e}")
+        except Exception as e: pass
 
-    # --- NGHIỆP VỤ ---
     def _do_start_order(self, code, parent_id=None, note=None):
         if not code: return
         try:
-            # Nếu đang có lệnh dừng chờ (pending), thực hiện dừng ngay lập tức
             if self.stop_deadline > 0 and self.pending_stop_data:
                 old_code, old_reason = self.pending_stop_data
                 self._do_stop_order(old_code, old_reason)
@@ -206,29 +207,23 @@ class CameraRuntime:
                 "note": final_note, "start_time": self.rec_start_time * 1000,
                 "order_id": self.current_order_db_id
             })
-        except Exception as e: print(f"❌ Start Err: {e}")
+        except Exception as e: pass
 
     def _do_stop_order(self, code, reason):
         print(f"⚪ STOP REC: {code} ({reason})")
-        
-        # [FIX UI] Lưu lại ID đơn hàng đang đóng để gửi cho Web
         closing_order_id = self.current_order_db_id
-
         video_path = self.recorder.stop()
         
-        # Cập nhật DB
         if self.current_order_db_id:
             if reason == OrderNote.CHECKING_ONLY:
                 order_repo.cancel_order(self.current_order_db_id)
             else:
                 order_repo.close_order(self.current_order_db_id, reason)
         
-        # Xử lý convert video
         if video_path and os.path.exists(video_path):
             vn_time = datetime.utcnow() + timedelta(hours=7)
             media_service.queue_video_conversion(video_path, code, vn_time, self.current_order_db_id)
         
-        # Đọc thông báo số lượng đơn
         if reason not in [OrderNote.CHECKING_ONLY, OrderNote.SYSTEM_RESTART]:
             try:
                 tz_vn = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -245,14 +240,12 @@ class CameraRuntime:
                 
                 if count:
                     self._safe_speak(f"Đã làm xong {count} đơn hôm nay")
-            except Exception as e: print(f"❌ TTS Count Error: {e}")
+            except Exception as e: pass
 
-        # [FIX UI] Gửi sự kiện STOP kèm theo ORDER_ID
-        # Việc này giúp Frontend biết chính xác thẻ nào cần xóa khỏi màn hình
         self._emit_event("ORDER_STOPPED", {
             "code": code, 
             "note": reason,
-            "order_id": closing_order_id  # <--- Quan trọng
+            "order_id": closing_order_id 
         })
         
         self.current_order_db_id = None
@@ -269,62 +262,79 @@ class CameraRuntime:
                     self._emit_event("ORDER_UPDATED", {"order_id": self.current_order_db_id, "path_avatar": path})
         except: pass
 
-    # --- MAIN LOOP ---
     def _capture_loop(self):
         print(f"📷 [Cam {self.cam_id}] Loop Started.")
         while self.is_running:
-            if not self.stream.connect(self.target_w, self.target_h):
-                time.sleep(RECONNECT_DELAY)
-                continue
-            
-            with self.lock: self.is_connected = True
-            frame_cnt = 0
-            err_cnt = 0
-            last_frame_time = time.time()
-
-            while self.is_running:
-                target_delay = 1.0 / self.fps_view_limit if self.fps_view_limit > 0 else 0.033
-                now = time.time()
-                if now - last_frame_time < target_delay:
-                    time.sleep(0.01)
+            try:
+                hw_w, hw_h = 640, 480
+                target_ratio = self.target_w / self.target_h if self.target_h > 0 else 1.33
+                if self.target_w >= 1280 or target_ratio > 1.5:
+                    hw_w, hw_h = 1280, 720
+                
+                if not self.stream.connect(hw_w, hw_h):
+                    time.sleep(RECONNECT_DELAY)
                     continue
-                last_frame_time = now
-
-                ret, raw_frame = self.stream.read()
-                if not ret:
-                    err_cnt += 1
-                    time.sleep(0.05)
-                    if err_cnt > 30: break 
-                    continue
+                
+                with self.lock: self.is_connected = True
+                frame_cnt = 0
                 err_cnt = 0
+                last_frame_time = time.time()
 
-                frame = self.img_proc.smart_resize(raw_frame, self.target_w, self.target_h)
-                if frame is None: continue
+                while self.is_running:
+                    # [QUAN TRỌNG NHẤT]: Trả CPU về cho hệ điều hành trong 5 mili-giây để Web/Socket không bị chết
+                    time.sleep(0.005) 
 
-                frame_cnt += 1
-                if frame_cnt % self.ai_interval == 0:
-                    try:
-                        if not self.ai_queue.full():
-                            ai_input = self.img_proc.preprocess_for_ai(frame)
-                            self.ai_queue.put_nowait({
-                                "cam_id": self.cam_id, "image": ai_input,
-                                "target_w": self.target_w, "target_h": self.target_h
-                            })
-                    except: pass
+                    ret, raw_frame = self.stream.read()
+                    if not ret:
+                        err_cnt += 1
+                        time.sleep(0.05)
+                        if err_cnt > 30: 
+                            print(f"🔄 [Cam {self.cam_id}] Mất luồng hình ảnh. Đang tự động kết nối lại...")
+                            break 
+                        continue
+                    err_cnt = 0
 
-                self._process_logic(now, frame)
-                self._draw_overlay(frame)
+                    now = time.time()
+                    target_delay = 1.0 / self.fps_view_limit if self.fps_view_limit > 0 else 0.033
+                    
+                    if now - last_frame_time < target_delay:
+                        # Vẫn nhường thêm CPU nếu Camera đọc quá nhanh
+                        time.sleep(0.002) 
+                        continue
+                        
+                    last_frame_time = now
 
-                if self.machine.state == MachineState.PACKING or self.stop_deadline > 0:
-                    self.recorder.write_frame(frame)
+                    frame = self.img_proc.smart_resize(raw_frame, self.target_w, self.target_h)
+                    if frame is None: continue
 
-                jpeg = self.img_proc.to_jpeg(frame)
-                if jpeg:
-                    with self.lock:
-                        self.jpeg_bytes = jpeg
-                        self.raw_frame_for_ai = frame 
+                    frame_cnt += 1
+                    if frame_cnt % self.ai_interval == 0:
+                        try:
+                            if not self.ai_queue.full():
+                                ai_input = self.img_proc.preprocess_for_ai(frame)
+                                self.ai_queue.put_nowait({
+                                    "cam_id": self.cam_id, "image": ai_input,
+                                    "target_w": self.target_w, "target_h": self.target_h
+                                })
+                        except: pass
 
-            self.stream.release()
+                    self._process_logic(now, frame)
+                    self._draw_overlay(frame)
+
+                    if self.machine.state == MachineState.PACKING or self.stop_deadline > 0:
+                        self.recorder.write_frame(frame)
+
+                    jpeg = self.img_proc.to_jpeg(frame)
+                    if jpeg:
+                        with self.lock:
+                            self.jpeg_bytes = jpeg
+                            self.raw_frame_for_ai = frame 
+
+            except Exception as e:
+                time.sleep(1.0)
+            finally:
+                self.stream.release()
+                with self.lock: self.is_connected = False
 
     def _process_logic(self, now, frame):
         if self.stop_deadline > 0:
@@ -352,7 +362,6 @@ class CameraRuntime:
             self.last_scanned_code = current_code
             self.last_scanned_time = now
             
-            # --- ĐỌC MÃ ---
             if current_code != self.last_spoken_code:
                 if now - self.last_scan_audio_time > self.SCAN_AUDIO_COOLDOWN:
                     n = self.read_end_digits_count
@@ -383,7 +392,6 @@ class CameraRuntime:
                     self._do_start_order(code, parent_id=cache['pid'], note=OrderNote.REPACK)
                     codes_for_machine = []
 
-        # Chuyển dữ liệu vào State Machine
         state, action, code, reason = self.machine.process(codes_for_machine, human)
 
         if action == Action.START_ORDER:
@@ -393,8 +401,6 @@ class CameraRuntime:
             note = OrderNote.MANUAL
             if reason == "TIMEOUT": note = OrderNote.TIMEOUT
             elif reason == "END_SHIFT": note = OrderNote.END_SHIFT
-            
-            print(f"⏳ Trigger Delayed Stop for {code} (5s)...")
             self.stop_deadline = now + 5.0
             self.pending_stop_data = (code, note)
             
@@ -402,7 +408,6 @@ class CameraRuntime:
             self._do_snapshot(frame, code)
             
         elif action == Action.SWITCH_ORDER:
-            # [FIX UI] Delay nhẹ 0.1s để sự kiện STOP được gửi đi chắc chắn trước khi START
             if self.stop_deadline > 0 and self.pending_stop_data:
                  old_c, old_r = self.pending_stop_data
                  self._do_stop_order(old_c, old_r)
@@ -411,7 +416,6 @@ class CameraRuntime:
             else:
                  self._do_stop_order(self.machine.last_closed_code, OrderNote.SCAN_NEW)
             
-            # Ngủ ngắn để Frontend kịp xử lý sự kiện STOP trước khi nhận sự kiện START
             time.sleep(0.1) 
             self._do_start_order(code, note=OrderNote.NEW_ORDER)
 
@@ -420,28 +424,38 @@ class CameraRuntime:
             if 5.5 < dur < 6.5:
                 silence = now - self.machine.last_human_seen_time
                 if silence > 5.0:
-                    print(f"⚠️ C4: No human {silence:.1f}s -> Cancel")
                     self.machine.state = MachineState.IDLE
                     self.machine.current_code = None
                     self._do_stop_order(code, OrderNote.CHECKING_ONLY)
 
     def _draw_overlay(self, frame):
-        state = self.machine.state
-        if state == MachineState.PACKING and self.machine.current_code:
-            text = f"PACKING: {self.machine.current_code}"
-            self.img_proc.draw_text(frame, text, 20, 50, (0, 255, 0))
-        elif self.stop_deadline > 0:
-            remain = max(0, self.stop_deadline - time.time())
-            text = f"FINISHING... {remain:.1f}s"
-            self.img_proc.draw_text(frame, text, 20, 50, (0, 165, 255))
-        elif self.last_scanned_code and (time.time() - self.last_scanned_time < 2.0):
-            text = f"DETECTED: {self.last_scanned_code}"
-            self.img_proc.draw_text(frame, text, 20, 50, (0, 255, 255))
+            state = self.machine.state
+            # Kéo text xuống một chút (từ 25 -> 35) để chữ to không bị lẹm viền trên
+            base_y = 35 
             
-        try:
-            tz = pytz.timezone('Asia/Ho_Chi_Minh')
-            now_s = datetime.now(tz).strftime("%d/%m/%Y %I:%M:%S %p")
-            self.img_proc.draw_text(frame, now_s, self.target_w - 360, 50, (255, 255, 255))
-        except:
-            now_s = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-            self.img_proc.draw_text(frame, now_s, self.target_w - 280, 50, (255, 255, 255))
+            if state == MachineState.PACKING and self.machine.current_code:
+                # Mã đơn hàng: Chữ to (0.8), in đậm (thickness=2)
+                self.img_proc.draw_text(frame, self.machine.current_code, 20, base_y, (59, 245, 140), scale=0.8, thickness=2)
+                # Trạng thái PACKING: Chữ vừa (0.5), in đậm (thickness=2), đẩy xuống dòng dưới
+                self.img_proc.draw_text(frame, "PACKING", 20, base_y + 30, (238, 245, 39), scale=0.5, thickness=2)
+                
+            elif self.stop_deadline > 0:
+                remain = int(max(0, self.stop_deadline - time.time()))
+                text = f"FINISHING... {remain}s"
+                # Chữ to, in đậm
+                self.img_proc.draw_text(frame, text, 20, base_y, (0, 165, 255), scale=0.8, thickness=2)
+                
+            elif self.last_scanned_code and (time.time() - self.last_scanned_time < 2.0):
+                text = f"DETECTED: {self.last_scanned_code}"
+                # Chữ to, in đậm
+                self.img_proc.draw_text(frame, text, 20, base_y, (0, 255, 255), scale=0.8, thickness=2)
+                
+            # Hiển thị thời gian (Góc phải)
+            try:
+                tz = pytz.timezone('Asia/Ho_Chi_Minh')
+                now_s = datetime.now(tz).strftime("%d/%m/%Y %I:%M:%S %p")
+                # Trừ hao 300px để chữ to không bị tràn ra ngoài lề phải
+                self.img_proc.draw_text(frame, now_s, self.target_w - 300, base_y, (255, 255, 255), scale=0.6, thickness=2)
+            except:
+                now_s = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                self.img_proc.draw_text(frame, now_s, self.target_w - 250, base_y, (255, 255, 255), scale=0.6, thickness=2)
